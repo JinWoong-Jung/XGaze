@@ -21,9 +21,9 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, StochasticWeightAveraging
 from pytorch_lightning.loggers.wandb import WandbLogger
 
-from semgaze.modeling.semgaze import SemGazeModule
-from semgaze.datasets.gazehoi import GazeHOIDataModule
-from semgaze.datasets.gazefollow import GazeFollowDataModule
+from XGaze.modeling.xgaze import XGazeModule
+from XGaze.datasets.gazefollow import GazeFollowDataModule
+from XGaze.datasets.video_attention_target import VideoAttentionTargetDataModule
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -69,43 +69,41 @@ class Experiment(BaseExperiment):
             pl.seed_everything(self.cfg.train.seed)
 
     def init_model(self):
-        model = SemGazeModule(cfg=self.cfg)
+        model = XGazeModule(cfg=self.cfg)
         return model
 
     def init_data(self):
+        batch_size = {
+            "train": self.cfg.train.batch_size,
+            "val": self.cfg.val.batch_size,
+            "test": self.cfg.test.batch_size,
+        }
+
         if self.cfg.experiment.dataset == "gazefollow":
             data = GazeFollowDataModule(
                 root=self.cfg.data.gf.root,
                 root_project=self.cfg.project.root,
                 root_heads=self.cfg.data.gf.root_heads,
-                batch_size={
-                    "train": self.cfg.train.batch_size,
-                    "val": self.cfg.val.batch_size,
-                    "test": self.cfg.test.batch_size,
-                },
+                batch_size=batch_size,
                 image_size=self.cfg.data.image_size,
                 heatmap_size=self.cfg.data.heatmap_size,
                 heatmap_sigma=self.cfg.data.heatmap_sigma,
                 num_people=self.cfg.data.num_people,
                 return_head_mask=self.cfg.data.return_head_mask,
+                num_workers=self.cfg.data.num_workers,
             )
-        elif self.cfg.experiment.dataset == "gazehoi":
-            data = GazeHOIDataModule(
-                root=self.cfg.data.gazehoi.root,
-                root_project=self.cfg.project.root,
-                batch_size={
-                    "train": self.cfg.train.batch_size,
-                    "val": self.cfg.val.batch_size,
-                    "test": self.cfg.test.batch_size,
-                },
+        elif self.cfg.experiment.dataset == "video_attention_target":
+            data = VideoAttentionTargetDataModule(
+                root=self.cfg.data.vat.root,
+                batch_size=batch_size,
                 image_size=self.cfg.data.image_size,
                 heatmap_size=self.cfg.data.heatmap_size,
                 heatmap_sigma=self.cfg.data.heatmap_sigma,
-                num_people=self.cfg.data.num_people,
-                return_head_mask=self.cfg.data.return_head_mask,
+                num_workers=self.cfg.data.num_workers,
             )
         else:
-            raise ValueError(f"Expected dataset to be one of [gazefollow, gazehoi]. Got {self.cfg.experiment.dataset}.")
+            raise ValueError(f"Expected dataset to be one of [`gazefollow`, `video_attention_target`]. Got {self.cfg.experiment.dataset}.")
+
         print(colored(f"Using the {self.cfg.experiment.dataset.upper()} dataset.", TERM_COLOR))
         return data
     

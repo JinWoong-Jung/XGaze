@@ -76,34 +76,6 @@ def dark_coordinate_decoding(heatmaps, kernel_size = 3, normalize = False):
     return dark_coords
 
 
-def is_point_in_box(points, boxes):
-    """
-    Check if a batch of 2D points are inside any bounding box in a set of bounding boxes.
-
-    Args:
-        points (Tensor): A PyTorch tensor of shape (2,) or (M, 2), where M is the number of points.
-            Each row represents a 2D point in the format (x, y).
-        boxes (Tensor): A PyTorch tensor of shape (N, 4), where N is the number of bounding boxes.
-            Each row represents a bounding box in the format (xmin, ymin, xmax, ymax).
-
-    Returns:
-        Tensor: A boolean tensor of shape (N,) or (M, N), where each element (i, j) indicates whether
-        point i is inside bounding box j.
-    """
-    if points.ndim == 1:
-        points = points.unsqueeze(0)
-    
-    x_min, y_min, x_max, y_max = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    x, y = points[:, 0], points[:, 1]
-
-    # Check if each point is inside each bounding box
-    isin = (x[:, None] >= x_min) & (x[:, None] <= x_max) & (y[:, None] >= y_min) & (y[:, None] <= y_max)
-    isin = isin.squeeze().int()
-
-    return isin
-
-
-
 def find_bounding_box(mask):
     """
     Find the minimal bounding box containing the mask.

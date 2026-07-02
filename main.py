@@ -8,15 +8,15 @@
 
 import hydra
 from hydra.core.config_store import ConfigStore
-from semgaze.config import MyConfig
-from semgaze.experiments import Experiment
+from XGaze.config import MyConfig
+from XGaze.experiments import Experiment
 
 
 cs = ConfigStore.instance()
 cs.store(name="my_config", node=MyConfig)
 
 
-@hydra.main(config_path="semgaze/conf", config_name="config", version_base="1.1")
+@hydra.main(config_path="XGaze/conf", config_name="config", version_base="1.1")
 def main(cfg: MyConfig) -> None:
     experiment = Experiment(cfg)
     experiment.setup()

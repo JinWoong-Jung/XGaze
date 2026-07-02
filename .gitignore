@@ -8,12 +8,12 @@
 data/
 weights/
 checkpoints/
-semgaze-artifacts.tar.gz
+XGaze-artifacts.tar.gz
 
 # Project
 __pycache__/
 main.log
-semgaze-artifacts.tar.gz
+XGaze-artifacts.tar.gz
 *.csv
 experiments/
 lightning_logs/

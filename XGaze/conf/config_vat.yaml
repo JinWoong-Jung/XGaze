@@ -7,49 +7,45 @@
 #
 
 # ==================================================================================================================== #
-#                                                EXPERIMENT CONFIGURATION                                              # 
+#                                    ZERO-SHOT EVALUATION ON VIDEOATTENTIONTARGET                                      #
 # ==================================================================================================================== #
 
 
 project:
-    name: semgaze # name of the wandb project
+    name: XGaze # name of the wandb project
     version: 1.0.0
-    description: SemGaze - Transformer encoder-decoder architecture for gaze target localization and recognition.
-    root: </path/to>/semgaze # FILL ME
+    description: XGaze - learnable query-based Cross-Attention for Gaze Estimation
+    root: /home/ubuntu/XGaze
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 experiment:
-    name: run-name # name of the wandb job
+    name: xgaze-zeroshot-vat # name of the wandb job
     group: null # name of the wandb group
-    task: train+test # combination of {train, val, test} separated by '+' sign
-    dataset: gazefollow # gazefollow, gazehoi
+    task: test # combination of {train, val, test} separated by '+' sign
+    dataset: video_attention_target
     path: ${hydra:runtime.cwd} # to retrieve logs and checkpoints
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 data:
     num_people: 1 # int or -1 to include all people
-    image_size: 256
+    image_size: 512
     heatmap_size: 64
     heatmap_sigma: 3
     return_head_mask: False
+    num_workers: 4
     gf:
-        root: </path/to>/gazefollow_extended # FILL ME
-        root_annotations: </path/to/folder/with/annotations> # FILL ME
-        root_heads: </path/to>/GazeFollow-head # FILL ME (if needed)
+        root: /home/ubuntu/XGaze/data/gazefollow/gazefollow_extended
+        root_heads: null
         num_train_samples: 108955
-        vocab_size: 346
-    gazehoi:
-        root: </path/to>/GazeHOI # FILL ME
-        num_train_samples: 47044
-        vocab_size: 463
-
-
+    vat:
+        root: /home/ubuntu/XGaze/data/video_attention_target
+        num_train_samples: 0
 # ------------------------------------------------------------------------------------------------------------------- #
 
 model:
-    semgaze:
+    XGaze:
         patch_size: 16
         token_dim: 768
         image_size: ${data.image_size}
@@ -59,18 +55,21 @@ model:
         encoder_num_global_tokens: 1
         decoder_depth: 2
         decoder_num_heads: 8
-        temp_init_value: 0.07
+        image_encoder_type: dinov3_hf # multimae, dinov3_hf
+        hf_image_encoder_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+        hf_image_encoder_local_dir: /home/ubuntu/XGaze/weights/dinov3-vitb16
+        hf_image_encoder_trust_remote_code: True
+        hf_image_encoder_frozen: True
     pretraining:
-        gaze_backbone: </path/to>/semgaze/weights/gaze360_resnet18.pt # FILL ME
-        image_encoder: </path/to>/semgaze/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth # FILL ME
+        gaze_backbone: /home/ubuntu/XGaze/weights/gaze360_resnet18.pt
+        image_encoder: /home/ubuntu/XGaze/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
     weights: null # /!\ null (default), or path to a checkpoint (overrides pretraining weights)
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 loss:
-    weight_heatmap: 1000
+    weight_heatmap: 100
     weight_angular: 3
-    weight_label: 1
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
@@ -86,21 +85,21 @@ scheduler:
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
-train: 
+train:
     seed: 10 # int or null for no seed
     matmul_precision: highest # highest (default), high, medium
-    precision: 32 # 64 (double), 32 (full), 16 (16bit mixed), bf16-mixed (bfloat16 mixed). Defaults to 32.
+    precision: bf16-mixed # 64 (double), 32 (full), 16 (16bit mixed), bf16-mixed (bfloat16 mixed). Defaults to 32.
     epochs: 20
-    batch_size: 300
+    batch_size: 128
     accumulate_grad_batches: 1 # 1 (default, no accumulation)
     device: cuda
-    resume: False 
-    resume_from: null 
+    resume: False
+    resume_from: null
     checkpointing:
         monitor: "metric/val/dist" # "metric/val/dist" (default), "loss/val", etc.
         mode: "min" # "min" (default), "max"
     freeze:
-        gaze_encoder: False 
+        gaze_encoder: False
         image_tokenizer: False
         image_encoder: False
         gaze_decoder: False
@@ -112,7 +111,7 @@ train:
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
-val: 
+val:
     checkpoint: null
     batch_size: 128
     device: ${train.device}
@@ -120,25 +119,25 @@ val:
 # ------------------------------------------------------------------------------------------------------------------- #
 
 test:
-    checkpoint: null # or experiments/yyyy-mm-dd/hh-mm-ss/checkpoints/last.ckpt to test from an existing experiment
-    batch_size: 128
+    checkpoint: /home/ubuntu/XGaze/checkpoints/best.ckpt
+    batch_size: 64
     device: ${train.device}
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 wandb:
-    log: True
-    entity: null # /!\ null, or your wandb entity
+    log: False
+    entity: skkai_social # /!\ null, or your wandb entity
     watch: null # /!\ null, gradients, parameters, all
     watch_freq: 500
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
-hydra: 
-    run: 
+hydra:
+    run:
         dir: ./
     sweep:
         dir: ${hydra.run.dir}
         subdir: ${hydra.job.num}
-    job: 
+    job:
         chdir: False

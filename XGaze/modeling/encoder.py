@@ -6,8 +6,9 @@
 # SPDX-License-Identifier: CC-BY-NC-4.0
 #
 
-import sys
 import math
+import os
+import sys
 from typing import Dict, List, Optional, Tuple, Type, Union
 
 import einops
@@ -15,8 +16,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import HfHubHTTPError
+from transformers import AutoModel
 
-from semgaze.utils.common import build_2d_sincos_posemb, pair
+from XGaze.utils.common import build_2d_sincos_posemb, pair
 
 # ****************************************************** #
 #                      GAZE ENCODER                      #
@@ -136,6 +140,149 @@ class ViTEncoder(nn.Module):
                 encoder_tokens.append(tokens)
 
         return encoder_tokens
+
+
+class HuggingFaceDinoImageEncoder(nn.Module):
+    def __init__(
+        self,
+        model_name: str,
+        local_dir: str | None = None,
+        image_size: int = 256,
+        patch_size: int = 16,
+        token_dim: int = 768,
+        freeze_backbone: bool = True,
+        trust_remote_code: bool = True,
+        input_mean: tuple[float, float, float] = (0.44232, 0.40506, 0.36457),
+        input_std: tuple[float, float, float] = (0.28674, 0.27776, 0.27995),
+        model_mean: tuple[float, float, float] = (0.485, 0.456, 0.406),
+        model_std: tuple[float, float, float] = (0.229, 0.224, 0.225),
+    ):
+        super().__init__()
+
+        if image_size % patch_size != 0:
+            raise ValueError(f"image_size={image_size} must be divisible by patch_size={patch_size}.")
+
+        self.model_name = model_name
+        self.local_dir = local_dir
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.token_dim = token_dim
+        self.freeze_backbone = freeze_backbone
+        self.num_patch_tokens = (image_size // patch_size) ** 2
+        self.feature_map_size = image_size // patch_size
+
+        self.backbone = self._load_backbone(model_name, local_dir, trust_remote_code)
+        hidden_dim = self._get_hidden_dim(self.backbone)
+        self.proj = nn.Identity() if hidden_dim == token_dim else nn.Linear(hidden_dim, token_dim)
+
+        self.register_buffer("input_mean", torch.tensor(input_mean).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("input_std", torch.tensor(input_std).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("model_mean", torch.tensor(model_mean).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("model_std", torch.tensor(model_std).view(1, 3, 1, 1), persistent=False)
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+            self.backbone.eval()
+
+    @staticmethod
+    def _is_pretrained_dir(path: str) -> bool:
+        return os.path.isdir(path) and os.path.isfile(os.path.join(path, "config.json"))
+
+    @classmethod
+    def _load_backbone(cls, model_name: str, local_dir: str | None, trust_remote_code: bool) -> nn.Module:
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        kwargs = {"trust_remote_code": trust_remote_code}
+        if token:
+            kwargs["token"] = token
+
+        if local_dir is not None and cls._is_pretrained_dir(local_dir):
+            return AutoModel.from_pretrained(local_dir, **kwargs)
+
+        try:
+            if local_dir is not None:
+                os.makedirs(local_dir, exist_ok=True)
+                snapshot_download(repo_id=model_name, local_dir=local_dir, token=token)
+                return AutoModel.from_pretrained(local_dir, **kwargs)
+
+            return AutoModel.from_pretrained(model_name, **kwargs)
+        except HfHubHTTPError as exc:
+            raise RuntimeError(
+                f"Failed to download Hugging Face image encoder '{model_name}'. "
+                "DINOv3 weights are gated on Hugging Face, so accept the model terms "
+                "on the model page and authenticate with `huggingface-cli login` or set `HF_TOKEN`."
+            ) from exc
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_backbone:
+            self.backbone.eval()
+        return self
+
+    @staticmethod
+    def _get_hidden_dim(model: nn.Module) -> int:
+        config = getattr(model, "config", None)
+        for attr in ("hidden_size", "embed_dim", "hidden_dim"):
+            value = getattr(config, attr, None)
+            if value is not None:
+                return int(value)
+        raise ValueError("Could not infer the hidden dimension from the Hugging Face DINO model config.")
+
+    @staticmethod
+    def _extract_tokens(outputs) -> torch.Tensor:
+        if hasattr(outputs, "last_hidden_state"):
+            return outputs.last_hidden_state
+        if hasattr(outputs, "x_norm_patchtokens"):
+            return outputs.x_norm_patchtokens
+        if isinstance(outputs, dict):
+            for key in ("last_hidden_state", "x_norm_patchtokens", "patch_tokens"):
+                if key in outputs:
+                    return outputs[key]
+        if isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+            return outputs[0]
+        raise ValueError("Could not extract patch tokens from the Hugging Face DINO model output.")
+
+    def _forward_backbone(self, images: torch.Tensor):
+        try:
+            return self.backbone(pixel_values=images, return_dict=True)
+        except TypeError:
+            return self.backbone(images)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        images = images * self.input_std + self.input_mean
+        images = (images - self.model_mean) / self.model_std
+
+        if self.freeze_backbone:
+            with torch.no_grad():
+                outputs = self._forward_backbone(images)
+        else:
+            outputs = self._forward_backbone(images)
+
+        tokens = self._extract_tokens(outputs)
+
+        if tokens.ndim == 4:
+            if tokens.shape[1] == self.token_dim:
+                return tokens
+            if tokens.shape[-1] == self.token_dim:
+                return tokens.permute(0, 3, 1, 2).contiguous()
+            if tokens.shape[1] == getattr(self.proj, "in_features", -1):
+                tokens = tokens.permute(0, 2, 3, 1).contiguous()
+            tokens = self.proj(tokens)
+            return tokens.permute(0, 3, 1, 2).contiguous()
+
+        if tokens.ndim != 3:
+            raise ValueError(f"Expected DINO tokens with 3 or 4 dims, received shape {tuple(tokens.shape)}.")
+        if tokens.shape[1] < self.num_patch_tokens:
+            raise ValueError(
+                f"Expected at least {self.num_patch_tokens} patch tokens from {self.model_name}, "
+                f"received {tokens.shape[1]}."
+            )
+
+        patch_tokens = tokens[:, -self.num_patch_tokens :, :]
+        patch_tokens = self.proj(patch_tokens)
+        b, _, d = patch_tokens.shape
+        s = self.feature_map_size
+        return patch_tokens.permute(0, 2, 1).view(b, d, s, s).contiguous()
 
 
 class TransformerBlock(nn.Module):
@@ -306,5 +453,3 @@ class SpatialInputTokenizer(nn.Module):
         x = x_tokens + x_pos_emb
 
         return x
-
-

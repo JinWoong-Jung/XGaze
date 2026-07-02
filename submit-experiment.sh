@@ -19,7 +19,7 @@
 
 ## Activate virtual environment
 source /path/to/miniconda3/etc/profile.d/conda.sh # UPDATE THIS
-conda activate semgaze
+conda activate XGaze
 
 ## Create a timestamp-based folder for the experiment
 DATE=$(date +"%Y-%m-%d")
@@ -28,7 +28,7 @@ EXPERIMENT_PATH="experiments/$DATE/$TIME"
 mkdir -p "$EXPERIMENT_PATH"
 
 ## Copy a code snapshot
-cp -r "semgaze" "main.py" "submit-experiment.sh" "$EXPERIMENT_PATH"
+cp -r "XGaze" "main.py" "submit-experiment.sh" "$EXPERIMENT_PATH"
 
 ## Switch to the experiment folder
 cd "$EXPERIMENT_PATH"

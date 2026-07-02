@@ -10,7 +10,7 @@ import torch
 import torchmetrics as tm
 from torchmetrics.functional.classification.auroc import binary_auroc
 
-from semgaze.utils.common import generate_binary_gaze_heatmap, is_point_in_box
+from XGaze.utils.common import generate_binary_gaze_heatmap
 
 
 class Distance(tm.Metric):
@@ -73,6 +73,42 @@ class GFTestDistance(tm.Metric):
         return dist_to_avg, avg_dist, min_dist
 
 
+class TestAUC(tm.Metric):
+    higher_is_better: bool = True
+    full_state_update: bool = False
+
+    def __init__(self):
+        """
+        Computes AUC for a test set with a single ground-truth gaze point per sample (eg. VideoAttentionTarget).
+        Samples with the gaze target outside the frame (inout_gt == 0) are skipped, since they have no valid
+        gaze point to build the ground-truth binary heatmap from.
+        """
+
+        super().__init__()
+        self.add_state("sum_auc", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("num_obs", default=torch.tensor(0.0), dist_reduce_fx="sum")
+
+    def update(
+        self,
+        gaze_heatmap_pred: torch.Tensor,
+        gaze_pt_gt: torch.Tensor,
+        inout_gt: torch.Tensor,
+    ):
+        size = gaze_heatmap_pred.shape[1:]  # (b, h, w) >> (h, w)
+        mask = inout_gt == 1
+        for hm_pred, gp_gt in zip(gaze_heatmap_pred[mask], gaze_pt_gt[mask]):
+            hm_gt_binary = generate_binary_gaze_heatmap(gp_gt, size=size)
+            self.sum_auc += binary_auroc(hm_pred, hm_gt_binary)
+        self.num_obs += mask.sum()
+
+    def compute(self):
+        if self.num_obs != 0:
+            auc = self.sum_auc / self.num_obs
+        else:
+            auc = torch.tensor(-1000.0, device=self.device)
+        return auc
+
+
 class GFTestAUC(tm.Metric):
     higher_is_better: bool = True
     full_state_update: bool = False
@@ -104,50 +140,3 @@ class GFTestAUC(tm.Metric):
         auc = self.sum_auc / self.num_obs
         return auc
 
-
-class GazeAccuracy(tm.Metric):
-    higher_is_better = True
-    full_state_update: bool = False
-    
-    def __init__(self):
-        super().__init__()
-        self.add_state("correct", default=torch.tensor(0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, gaze_point_pred: torch.Tensor, gaze_bbox_gt: torch.Tensor):
-        isin = is_point_in_box(gaze_point_pred, gaze_bbox_gt).diag()
-        self.correct += isin.sum()
-        self.total += gaze_point_pred.size(0)
-
-    def compute(self):
-        return self.correct.float() / self.total
-
-    
-class MultiAccuracy(tm.Metric):
-    higher_is_better = True
-    full_state_update: bool = False
-    
-    def __init__(self, top_k: int = 1, ignore_index = None):
-        super().__init__()
-        self.top_k = top_k
-        self.ignore_index = ignore_index
-        self.add_state("correct", default=torch.tensor(0), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, preds: torch.Tensor, target: torch.Tensor):
-        if self.ignore_index is not None:
-            mask = (target != self.ignore_index).any(dim=1)
-            preds = preds[mask]
-            target = target[mask]
-        
-        # Get the top k predictions
-        top_k_preds = preds.topk(self.top_k, dim=1)[1]
-        
-        # Check if any of the top k predictions match any of the target classes
-        target = target.unsqueeze(1) # Expand dims of target for broadcasting
-        correct = torch.any(top_k_preds.unsqueeze(2) == target, dim=1).any(dim=1).sum()
-        self.correct += correct
-        self.total += target.size(0)
-
-    def compute(self):
-        return self.correct.float() / self.total

@@ -10,7 +10,7 @@ import math
 import torch
 import torchvision.transforms.functional as TF
 
-from semgaze.utils.common import get_img_size, pair
+from XGaze.utils.common import get_img_size, pair
 
 
 # ============================================================================= #
