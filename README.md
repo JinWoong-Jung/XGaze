@@ -1,80 +1,133 @@
-# Toward Semantic Gaze Target Detection
+# XGaze: Cross-Attention based Gaze Estimation
 
-![image info](./assets/qualitative-results.png)
+Learnable query-based cross-attention for gaze target detection, extended to multi-person
+supervision (in/out-of-frame prediction) and evaluation on **GazeFollow**,
+**VideoAttentionTarget (VAT)**, and **ChildPlay**.
 
-## Overview
+> Built on top of [Toward Semantic Gaze Target Detection (NeurIPS 2024)](https://proceedings.neurips.cc/paper_files/paper/2024/file/dbeb7e621d4a554069a6a775da0f7273-Paper-Conference.pdf) by Tafasca et al. See [Citation](#citation).
 
-**Authors:** Samy Tafasca, Anshul Gupta, Victor Bros, Jean-marc Odobez 
+> ⚠️ This is an early draft README.
 
-[`Paper`](https://proceedings.neurips.cc/paper_files/paper/2024/file/dbeb7e621d4a554069a6a775da0f7273-Paper-Conference.pdf) | [`Video`](https://neurips.cc/virtual/2024/poster/96207) | [`Poster`](https://neurips.cc/media/PosterPDFs/NeurIPS%202024/96207.png?t=1731674687.8646579) | [`BibTeX`](#citation)
+---
 
-![image info](./assets/xgaze-architecture.png)
+## 1. Environment Setup
 
-This repository is configured for GazeFollow gaze target localization experiments.
-
-## Setup
-### 1. Create the Conda environment
-First, we need to clone the repository 
 ```shell
 git clone https://github.com/JinWoong-Jung/XGaze.git
 cd XGaze
-```
 
-Next, create the conda environment and install the necessary packages
-```shell
 conda create -n XGaze python=3.11.0
 conda activate XGaze
 pip install -r requirements.txt
 ```
 
-### 2. Download data
-In order to reproduce the experiments, you will need to download the GazeFollow dataset. GazeFollow can be downloaded from [here](https://www.dropbox.com/s/3ejt9pm57ht2ed4/gazefollow_extended.zip?dl=0).
+Pre-trained initialization weights (Gaze360 ResNet18, DINOv3 ViT-B) are expected under
+`weights/`. Trained checkpoints go under `checkpoints/`.
 
-First, you can download all resources from the following [link](https://zenodo.org/records/17107341). Unzip the file and place the folders `data`, `weights` and `checkpoints` under the project directory.
+---
 
-The folder `data` contains instructions and annotations for GazeFollow. Refer to `data/README.md` for more details.
+## 2. Dataset Setup
 
-The folder `weights` contains pre-trained models used to initialize the architecture when training on GazeFollow. This includes a ResNet18 pre-trained on Gaze360 to initialize the gaze encoder and a [MultiMAE](https://github.com/EPFL-VILAB/MultiMAE) pre-trained on Imagenet to initialize the image encoder. Furthermore, we provide the weights of a head detector to automatically detect people in the images for demo purposes.
+Download each dataset, then point the config files to your local paths.
 
-If you want to experiment with decoding multiple people simultaneously, you will also need to detect extra people that were not annotated in the original datasets. Refer to the [Sharingan](https://github.com/idiap/sharingan) repository for more details. This was only used to produce the ablation results regarding the number of people (cf. Table 3 of the paper).
+| Dataset | Used for | Config file |
+|---|---|---|
+| GazeFollow | training + test | `XGaze/conf/config_gf.yaml` |
+| VideoAttentionTarget | fine-tuning / zero-shot test | `XGaze/conf/config_vat.yaml` |
+| ChildPlay | fine-tuning / zero-shot test | `XGaze/conf/config_childplay.yaml` |
 
-### 3. Configure the paths in the configuration files
-Finally, update the data paths in the yaml configuration files that can be found in `XGaze/conf`. For more details, please refer to the [Sharingan](https://github.com/idiap/sharingan) repository which follows a very similar structure.
+In each config, set the dataset root(s), e.g.:
 
-## Training and Testing
-This project uses PyTorch Lightning to structure the code for experimentation. The `main.py` python file is the entry point, but we use the `submit-experiment.sh` to properly setup the experiment by creating a folder (ie. `date/time`) under `experiments` to store the results before submitting the job to SLURM. This will also take a snapshot of the code used to run the experiment.
-
-Moreover, we use the Hydra package to organize configuration files. The GazeFollow configuration is available at `XGaze/conf/config_gf.yaml`.
-
-Here is how you can run a training job on GazeFollow
-```shell
-python main.py --config-name "config_gf"
+```yaml
+data:
+    gf:
+        root: /path/to/gazefollow_extended
+    vat:
+        root: /path/to/VideoAttentionTarget
+    childplay:
+        root: /path/to/ChildPlay
 ```
-Running the above command should start training on GazeFollow. At the end, you should get results that are similar to the paper (both `last.ckpt` and `best.ckpt` should be more or less the same). 
 
-If using SLURM, the preferred way is to submit a job via `submit-experiment.sh` as follows:
+Also update `project.root` and `model.XGaze.hf_image_encoder_local_dir` to your machine's paths.
+
+---
+
+## 3. Training & Testing
+
+The entry point is `main.py` (Hydra + PyTorch Lightning). Select the dataset via `--config-name`.
+
+**Train on GazeFollow (from scratch), then test:**
 ```shell
-sbatch submit-experiment.sh
+python main.py --config-name=config_gf experiment.task="train+test"
 ```
-Feel free to modify the `submit-experiment.sh` script to suit your needs. There are some fields to update.
 
-You can also override parts of the default configuration file (`XGaze/conf/config.yaml`) via command line arguments. This can be used for example to test a model on a dataset. The code below will evaluate the GazeFollow model checkpoint on GazeFollow's test set.
-
+**VAT / ChildPlay** — warm-start from a GazeFollow checkpoint, then fine-tune or run zero-shot:
 ```shell
-python main.py experiment.task=test experiment.dataset=gazefollow test.checkpoint=checkpoints/gazefollow.ckpt
+# zero-shot test only
+python main.py --config-name=config_vat experiment.task="test" \
+    model.weights="checkpoints/best_gf.ckpt"
+
+# fine-tune then test
+python main.py --config-name=config_vat experiment.task="train+test" \
+    model.weights="checkpoints/best_gf.ckpt"
 ```
-Running the above command should output the results reported in the paper for the GazeFollow dataset.
+(Replace `config_vat` with `config_childplay` for ChildPlay.)
 
-> Please note that in order to achieve optimal recognition accuracy, you need to use larger batch sizes (i.e. 300), which will require a larger GPU (e.g. H100 with 80GB). You may need to slightly adapt the code (i.e. `XGaze/experiments.py`) if you need to train on multiple GPUs.
+SLURM submission scripts are provided: `train_gf.sh`, `train_vat.sh`, `train_cp.sh`.
 
-## Model Checkpoints
-Model checkpoints can be found under the `checkpoints` folder.
+---
 
-## Demo
-For convenience, we also provide a demo jupyter notebook `notebooks/demo.ipynb` to get you started with the inference process on images.
+## 4. Results
+
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" align="left">Method</th>
+      <th colspan="3" align="center">GazeFollow</th>
+      <th colspan="3" align="center">VideoAttentionTarget</th>
+      <th colspan="3" align="center">ChildPlay</th>
+    </tr>
+    <tr>
+      <th align="center">AUC &uarr;</th>
+      <th align="center">Avg L2 &darr;</th>
+      <th align="center">Min L2 &darr;</th>
+      <th align="center">AUC &uarr;</th>
+      <th align="center">L2 &darr;</th>
+      <th align="center">AP<sub>in/out</sub> &uarr;</th>
+      <th align="center">AUC &uarr;</th>
+      <th align="center">L2 &darr;</th>
+      <th align="center">AP &uarr;</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="left">Gaze-LLE (ViT-B)</td>
+      <td align="center">0.956</td><td align="center">0.104</td><td align="center">0.045</td>
+      <td align="center">0.933</td><td align="center">0.107</td><td align="center">0.897</td>
+      <td align="center">0.949</td><td align="center">0.106</td><td align="center">0.994</td>
+    </tr>
+    <tr>
+      <td align="left">Gaze-LLE (ViT-L)</td>
+      <td align="center">0.958</td><td align="center">0.099</td><td align="center">0.041</td>
+      <td align="center">0.937</td><td align="center">0.103</td><td align="center">0.903</td>
+      <td align="center">0.951</td><td align="center">0.101</td><td align="center">0.994</td>
+    </tr>
+    <tr>
+      <td align="left"><b>Ours*</b></td>
+      <td align="center">0.950</td><td align="center">0.098</td><td align="center">0.044</td>
+      <td align="center">0.969</td><td align="center">0.095</td><td align="center">0.658</td>
+      <td align="center">0.975</td><td align="center">0.093</td><td align="center">0.972</td>
+    </tr>
+  </tbody>
+</table>
+
+\* **Ours** — VideoAttentionTarget and ChildPlay results are **zero-shot** (no fine-tuning);
+GazeFollow is the trained result. See [`results.md`](./results.md) for details.
+
+---
 
 ## Citation
-If you use our code, models or data assets, please consider citing us:
+
 ```bibtex
 @article{tafasca2024toward,
   title={Toward Semantic Gaze Target Detection},
@@ -87,4 +140,5 @@ If you use our code, models or data assets, please consider citing us:
 ```
 
 ## Acknowledgement
-This codebase is based in part on the repositories of [MultiMAE](https://github.com/EPFL-VILAB/MultiMAE) and [SegmentAnything](https://github.com/facebookresearch/segment-anything). We are thankful to the authors for their contributions.
+This codebase builds on [Sharingan](https://github.com/idiap/sharingan) /
+[MultiMAE](https://github.com/EPFL-VILAB/MultiMAE). We thank the authors for their contributions.
