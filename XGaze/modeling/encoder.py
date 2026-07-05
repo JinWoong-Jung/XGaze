@@ -150,7 +150,6 @@ class HuggingFaceDinoImageEncoder(nn.Module):
         image_size: int = 256,
         patch_size: int = 16,
         token_dim: int = 768,
-        freeze_backbone: bool = True,
         trust_remote_code: bool = True,
         input_mean: tuple[float, float, float] = (0.44232, 0.40506, 0.36457),
         input_std: tuple[float, float, float] = (0.28674, 0.27776, 0.27995),
@@ -167,7 +166,6 @@ class HuggingFaceDinoImageEncoder(nn.Module):
         self.image_size = image_size
         self.patch_size = patch_size
         self.token_dim = token_dim
-        self.freeze_backbone = freeze_backbone
         self.num_patch_tokens = (image_size // patch_size) ** 2
         self.feature_map_size = image_size // patch_size
 
@@ -179,11 +177,6 @@ class HuggingFaceDinoImageEncoder(nn.Module):
         self.register_buffer("input_std", torch.tensor(input_std).view(1, 3, 1, 1), persistent=False)
         self.register_buffer("model_mean", torch.tensor(model_mean).view(1, 3, 1, 1), persistent=False)
         self.register_buffer("model_std", torch.tensor(model_std).view(1, 3, 1, 1), persistent=False)
-
-        if freeze_backbone:
-            for param in self.backbone.parameters():
-                param.requires_grad = False
-            self.backbone.eval()
 
     @staticmethod
     def _is_pretrained_dir(path: str) -> bool:
@@ -212,12 +205,6 @@ class HuggingFaceDinoImageEncoder(nn.Module):
                 "DINOv3 weights are gated on Hugging Face, so accept the model terms "
                 "on the model page and authenticate with `huggingface-cli login` or set `HF_TOKEN`."
             ) from exc
-
-    def train(self, mode: bool = True):
-        super().train(mode)
-        if self.freeze_backbone:
-            self.backbone.eval()
-        return self
 
     @staticmethod
     def _get_hidden_dim(model: nn.Module) -> int:
@@ -252,12 +239,7 @@ class HuggingFaceDinoImageEncoder(nn.Module):
         images = images * self.input_std + self.input_mean
         images = (images - self.model_mean) / self.model_std
 
-        if self.freeze_backbone:
-            with torch.no_grad():
-                outputs = self._forward_backbone(images)
-        else:
-            outputs = self._forward_backbone(images)
-
+        outputs = self._forward_backbone(images)
         tokens = self._extract_tokens(outputs)
 
         if tokens.ndim == 4:

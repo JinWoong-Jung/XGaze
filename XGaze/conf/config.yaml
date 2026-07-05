@@ -56,7 +56,6 @@ model:
         hf_image_encoder_name: facebook/dinov3-vitb16-pretrain-lvd1689m
         hf_image_encoder_local_dir: /home/ubuntu/XGaze/weights/dinov3-vitb16
         hf_image_encoder_trust_remote_code: True
-        hf_image_encoder_frozen: True
     pretraining:
         gaze_backbone: /home/ubuntu/XGaze/weights/gaze360_resnet18.pt
         image_encoder: /home/ubuntu/XGaze/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
@@ -98,7 +97,7 @@ train:
     freeze:
         gaze_encoder: False 
         image_tokenizer: False
-        image_encoder: False
+        image_encoder: True
         gaze_decoder: False
     swa:
         use: True

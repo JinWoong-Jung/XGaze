@@ -7,7 +7,8 @@
 #
 
 # ==================================================================================================================== #
-#                                                EXPERIMENT CONFIGURATION                                              # 
+#                         FINETUNING OR ZERO-SHOT EVALUATION ON CHILDPLAY (multi-person)                               #
+#         Set experiment.task to `test` for zero-shot eval, or `train+test` to finetune then test.                    #
 # ==================================================================================================================== #
 
 
@@ -20,10 +21,10 @@ project:
 # ------------------------------------------------------------------------------------------------------------------- #
 
 experiment:
-    name: XGaze-gf(batch=128) # name of the wandb job
+    name: xgaze-childplay(zero-shot) # name of the wandb job
     group: null # name of the wandb group
-    task: train+test # combination of {train, val, test} separated by '+' sign
-    dataset: gazefollow
+    task: test # combination of {train, val, test} separated by '+' sign
+    dataset: childplay
     path: ${hydra:runtime.cwd} # to retrieve logs and checkpoints
 
 # ------------------------------------------------------------------------------------------------------------------- #
@@ -39,6 +40,10 @@ data:
         root: /home/jinwoongjung/MTGS/data/gazefollow_extended
         root_heads: null
         num_train_samples: 108955
+    childplay:
+        root: /home/jinwoongjung/MTGS/data/ChildPlay
+        num_train_samples: 99527
+        max_people: 4 # max number of people (per frame) the model predicts a heatmap/gaze_vec/inout for
 # ------------------------------------------------------------------------------------------------------------------- #
 
 model:
@@ -66,22 +71,23 @@ model:
 loss:
     weight_heatmap: 100
     weight_angular: 3
+    weight_inout: 1
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 optimizer:
-    lr: 2e-4
+    lr: 2e-5
     weight_decay: 3e-3
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 scheduler:
     type: cosine_warmup # cosine_warmup (default), null (no scheduler)
-    warmup_epochs: 4
+    warmup_epochs: 0
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
-train: 
+train:
     seed: 10 # int or null for no seed
     matmul_precision: highest # highest (default), high, medium
     precision: bf16-mixed # 64 (double), 32 (full), 16 (16bit mixed), bf16-mixed (bfloat16 mixed). Defaults to 32.
@@ -89,13 +95,13 @@ train:
     batch_size: 256
     accumulate_grad_batches: 1 # 1 (default, no accumulation)
     device: cuda
-    resume: False 
-    resume_from: null 
+    resume: False
+    resume_from: null
     checkpointing:
         monitor: "metric/val/dist" # "metric/val/dist" (default), "loss/val", etc.
         mode: "min" # "min" (default), "max"
     freeze:
-        gaze_encoder: False 
+        gaze_encoder: False
         image_tokenizer: False
         image_encoder: True
         gaze_decoder: False
@@ -107,7 +113,7 @@ train:
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
-val: 
+val:
     checkpoint: null
     batch_size: 128
     device: ${train.device}
@@ -129,11 +135,11 @@ wandb:
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
-hydra: 
-    run: 
+hydra:
+    run:
         dir: ./
     sweep:
         dir: ${hydra.run.dir}
         subdir: ${hydra.job.num}
-    job: 
+    job:
         chdir: False

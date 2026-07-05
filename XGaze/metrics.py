@@ -94,7 +94,7 @@ class TestAUC(tm.Metric):
         gaze_pt_gt: torch.Tensor,
         inout_gt: torch.Tensor,
     ):
-        size = gaze_heatmap_pred.shape[1:]  # (b, h, w) >> (h, w)
+        size = gaze_heatmap_pred.shape[-2:]  # (b, h, w) or (b, n, h, w) >> (h, w)
         mask = inout_gt == 1
         for hm_pred, gp_gt in zip(gaze_heatmap_pred[mask], gaze_pt_gt[mask]):
             hm_gt_binary = generate_binary_gaze_heatmap(gp_gt, size=size)

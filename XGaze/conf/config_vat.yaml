@@ -7,7 +7,8 @@
 #
 
 # ==================================================================================================================== #
-#                                    ZERO-SHOT EVALUATION ON VIDEOATTENTIONTARGET                                      #
+#                    FINETUNING OR ZERO-SHOT EVALUATION ON VIDEOATTENTIONTARGET (multi-person)                         #
+#         Set experiment.task to `test` for zero-shot eval, or `train+test` to finetune then test.                    #
 # ==================================================================================================================== #
 
 
@@ -15,12 +16,12 @@ project:
     name: XGaze # name of the wandb project
     version: 1.0.0
     description: XGaze - learnable query-based Cross-Attention for Gaze Estimation
-    root: /home/ubuntu/XGaze
+    root: /home/jinwoongjung/XGaze
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 experiment:
-    name: xgaze-zeroshot-vat # name of the wandb job
+    name: xgaze-vat(zero-shot) # name of the wandb job
     group: null # name of the wandb group
     task: test # combination of {train, val, test} separated by '+' sign
     dataset: video_attention_target
@@ -36,12 +37,13 @@ data:
     return_head_mask: False
     num_workers: 4
     gf:
-        root: /home/ubuntu/XGaze/data/gazefollow/gazefollow_extended
+        root: /home/jinwoongjung/MTGS/data/gazefollow_extended
         root_heads: null
         num_train_samples: 108955
     vat:
-        root: /home/ubuntu/XGaze/data/video_attention_target
-        num_train_samples: 0
+        root: /home/jinwoongjung/MTGS/data/VideoAttentionTarget
+        num_train_samples: 54513
+        max_people: 8 # max number of people (per frame) the model predicts a heatmap/gaze_vec/inout for
 # ------------------------------------------------------------------------------------------------------------------- #
 
 model:
@@ -57,12 +59,11 @@ model:
         decoder_num_heads: 8
         image_encoder_type: dinov3_hf # multimae, dinov3_hf
         hf_image_encoder_name: facebook/dinov3-vitb16-pretrain-lvd1689m
-        hf_image_encoder_local_dir: /home/ubuntu/XGaze/weights/dinov3-vitb16
+        hf_image_encoder_local_dir: /home/jinwoongjung/XGaze/weights/dinov3-vitb16
         hf_image_encoder_trust_remote_code: True
-        hf_image_encoder_frozen: True
     pretraining:
-        gaze_backbone: /home/ubuntu/XGaze/weights/gaze360_resnet18.pt
-        image_encoder: /home/ubuntu/XGaze/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
+        gaze_backbone: /home/jinwoongjung/XGaze/weights/gaze360_resnet18.pt
+        image_encoder: /home/jinwoongjung/XGaze/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
     weights: null # /!\ null (default), or path to a checkpoint (overrides pretraining weights)
 
 # ------------------------------------------------------------------------------------------------------------------- #
@@ -70,18 +71,19 @@ model:
 loss:
     weight_heatmap: 100
     weight_angular: 3
+    weight_inout: 1
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 optimizer:
-    lr: 2e-4
+    lr: 2e-5
     weight_decay: 3e-3
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 scheduler:
     type: cosine_warmup # cosine_warmup (default), null (no scheduler)
-    warmup_epochs: 4
+    warmup_epochs: 0
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
@@ -90,7 +92,7 @@ train:
     matmul_precision: highest # highest (default), high, medium
     precision: bf16-mixed # 64 (double), 32 (full), 16 (16bit mixed), bf16-mixed (bfloat16 mixed). Defaults to 32.
     epochs: 20
-    batch_size: 128
+    batch_size: 256
     accumulate_grad_batches: 1 # 1 (default, no accumulation)
     device: cuda
     resume: False
@@ -101,7 +103,7 @@ train:
     freeze:
         gaze_encoder: False
         image_tokenizer: False
-        image_encoder: False
+        image_encoder: True
         gaze_decoder: False
     swa:
         use: True
@@ -119,14 +121,14 @@ val:
 # ------------------------------------------------------------------------------------------------------------------- #
 
 test:
-    checkpoint: /home/ubuntu/XGaze/checkpoints/best.ckpt
-    batch_size: 64
+    checkpoint: null
+    batch_size: 128
     device: ${train.device}
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 wandb:
-    log: False
+    log: True
     entity: skkai_social # /!\ null, or your wandb entity
     watch: null # /!\ null, gradients, parameters, all
     watch_freq: 500

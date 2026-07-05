@@ -62,9 +62,12 @@ class GazeDecoder(nn.Module):
             feature_map_size=feature_map_size,
             heatmap_size=heatmap_size,
         )
-        
+
         # MLP for heatmap embeddings
         self.heatmap_mlp = MLP(token_dim, token_dim, heatmap_emb_dim, 3)
+
+        # 2-layer MLP head predicting in/out-of-frame per person query
+        self.inout_decoder = MLP(token_dim, token_dim, 1, 2)
 
     @staticmethod
     def _build_upscaler(token_dim: int, feature_map_size: int, heatmap_size: int) -> tuple[nn.Sequential, int]:
@@ -108,33 +111,41 @@ class GazeDecoder(nn.Module):
         self,
         image_tokens: torch.Tensor,
         gaze_tokens: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Predict gaze heatmaps given image and gaze tokens.
+        Predict per-person gaze heatmaps and in/out-of-frame logits given image and gaze tokens.
+        One learnable query is instantiated per person (batched over `n`), seeded with that
+        person's own gaze token so that queries differ across people. Each query only ever sees
+        (a) the shared scene tokens (`image_context`, same for every person) and (b) that same
+        person's own gaze token (`gaze_tokens[:, i]`) - never another person's gaze token - so the
+        n people are processed fully independently of one another, just batched for efficiency.
 
         Arguments:
-          image_tokens (torch.Tensor): the tokens encoding the scene image
-          gaze_tokens (torch.Tensor): the tokens encoding people's head/gaze information
+          image_tokens (torch.Tensor): the tokens encoding the scene image, shape (b, c, h, w)
+          gaze_tokens (torch.Tensor): the tokens encoding people's head/gaze information, shape (b, n, c)
 
         Returns:
-          torch.Tensor: batched predicted gaze heatmaps
+          tuple[torch.Tensor, torch.Tensor]: batched predicted gaze heatmaps (b, n, hm_h, hm_w)
+          and in/out-of-frame logits (b, n)
         """
 
         b, ic, ih, iw = image_tokens.shape  # (b, c, h, w)
+        n = gaze_tokens.shape[1]
 
         image_context = image_tokens.view(b, ic, ih * iw).permute(0, 2, 1)  # (b, h*w, c)
-        queries = self.query_tokens.expand(b, -1, -1)  # (b, 1, c)
+        queries = self.query_tokens.expand(b, n, -1) + gaze_tokens  # (b, n, c)
         for block in self.blocks:
             queries = block(queries=queries, image_context=image_context, gaze_context=gaze_tokens)
-        
-        upscaled_image_tokens = self.upscaler(image_tokens) # (b, c', hm_h, hm_w)
+
+        upscaled_image_tokens = self.upscaler(image_tokens)  # (b, c', hm_h, hm_w)
         b, c, h, w = upscaled_image_tokens.shape
-        
-        gaze_heatmap_emb = self.heatmap_mlp(queries) # (b, 1, c')
-        gaze_heatmap = (gaze_heatmap_emb @ upscaled_image_tokens.view(b, c, h * w)) # (b, 1, hm_h*hm_w)
-        gaze_heatmap = gaze_heatmap.view(b, 1, h, w) # (b, 1, hm_h, hm_w)
-        
-        return gaze_heatmap
+
+        gaze_heatmap_emb = self.heatmap_mlp(queries)  # (b, n, c')
+        gaze_heatmap = torch.einsum("bnc,bchw->bnhw", gaze_heatmap_emb, upscaled_image_tokens)  # (b, n, hm_h, hm_w)
+
+        inout_logits = self.inout_decoder(queries).squeeze(-1)  # (b, n)
+
+        return gaze_heatmap, inout_logits
 
 
 class MLP(nn.Module):
@@ -185,10 +196,17 @@ class QueryGazeAttentionBlock(nn.Module):
         image_context: Tensor,
         gaze_context: Tensor,
     ) -> Tensor:
+        b, n, c = queries.shape
+
+        # Each person's query independently attends to the shared scene tokens (no cross-person mixing here either).
         queries = queries + self.cross_attn_query_to_image(q=queries, k=image_context, v=image_context)
         queries = self.norm_image(queries)
 
-        queries = queries + self.cross_attn_query_to_gaze(q=queries, k=gaze_context, v=gaze_context)
+        # Attend to this person's OWN gaze token only: merge (b, n) into the attention batch so
+        # query i only ever sees gaze_context i, never another person's gaze token.
+        q_own = queries.reshape(b * n, 1, c)
+        gaze_own = gaze_context.reshape(b * n, 1, c)
+        queries = queries + self.cross_attn_query_to_gaze(q=q_own, k=gaze_own, v=gaze_own).reshape(b, n, c)
         queries = self.norm_gaze(queries)
 
         queries = queries + self.mlp(queries)

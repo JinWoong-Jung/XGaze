@@ -24,6 +24,7 @@ from pytorch_lightning.loggers.wandb import WandbLogger
 from XGaze.modeling.xgaze import XGazeModule
 from XGaze.datasets.gazefollow import GazeFollowDataModule
 from XGaze.datasets.video_attention_target import VideoAttentionTargetDataModule
+from XGaze.datasets.childplay import ChildPlayDataModule
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -99,10 +100,25 @@ class Experiment(BaseExperiment):
                 image_size=self.cfg.data.image_size,
                 heatmap_size=self.cfg.data.heatmap_size,
                 heatmap_sigma=self.cfg.data.heatmap_sigma,
+                max_people=self.cfg.data.vat.get("max_people", 8),
+                return_head_mask=self.cfg.data.return_head_mask,
+                num_workers=self.cfg.data.num_workers,
+            )
+        elif self.cfg.experiment.dataset == "childplay":
+            data = ChildPlayDataModule(
+                root=self.cfg.data.childplay.root,
+                batch_size=batch_size,
+                image_size=self.cfg.data.image_size,
+                heatmap_size=self.cfg.data.heatmap_size,
+                heatmap_sigma=self.cfg.data.heatmap_sigma,
+                max_people=self.cfg.data.childplay.get("max_people", 4),
+                return_head_mask=self.cfg.data.return_head_mask,
                 num_workers=self.cfg.data.num_workers,
             )
         else:
-            raise ValueError(f"Expected dataset to be one of [`gazefollow`, `video_attention_target`]. Got {self.cfg.experiment.dataset}.")
+            raise ValueError(
+                f"Expected dataset to be one of [`gazefollow`, `video_attention_target`, `childplay`]. Got {self.cfg.experiment.dataset}."
+            )
 
         print(colored(f"Using the {self.cfg.experiment.dataset.upper()} dataset.", TERM_COLOR))
         return data

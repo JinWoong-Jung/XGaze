@@ -301,6 +301,10 @@ class GazeFollowDataModule(pl.LightningDataModule):
         if self.num_workers > 0:
             kwargs["persistent_workers"] = True
             kwargs["prefetch_factor"] = 1
+            # "spawn" avoids forking DataLoader workers after CUDA is already initialized in the
+            # main process (PyTorch Lightning moves the model to GPU before the first batch is
+            # fetched) -- forking post-CUDA-init crashes workers with "CUDA error: initialization error".
+            kwargs["multiprocessing_context"] = "spawn"
         return kwargs
         
     def setup(self, stage: str):

@@ -89,14 +89,16 @@ class RandomHorizontalFlip(object):
 
             # Flip Head Bboxes
             sample["head_bboxes"][:, [0, 2]] = 1.0 - sample["head_bboxes"][:, [2, 0]]
-            
-            # Flip Gaze Points
-            if sample["inout"] == 1.:
-                if sample["gaze_pt"].ndim == 2:
-                    mask = sample["gaze_pt"][:, 0] != -1.0
-                    sample["gaze_pt"][mask, 0] = 1.0 - sample["gaze_pt"][mask, 0]
-                else:
-                    sample["gaze_pt"][0] = 1.0 - sample["gaze_pt"][0]
+
+            # Flip Gaze Points. `gaze_pt.ndim == 2` covers both the GazeFollow test set (multiple
+            # annotators) and the multi-person case (one row per person); both use -1 as the
+            # per-entry sentinel for "no valid gaze point", so masking on it is enough and does
+            # not need `sample["inout"]` (which is per-person there, not a single scalar).
+            if sample["gaze_pt"].ndim == 2:
+                mask = sample["gaze_pt"][:, 0] != -1.0
+                sample["gaze_pt"][mask, 0] = 1.0 - sample["gaze_pt"][mask, 0]
+            elif sample["inout"] == 1.:
+                sample["gaze_pt"][0] = 1.0 - sample["gaze_pt"][0]
 
         return sample
 

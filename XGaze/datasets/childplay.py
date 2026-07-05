@@ -26,22 +26,28 @@ IMG_MEAN = [0.44232, 0.40506, 0.36457]
 IMG_STD = [0.28674, 0.27776, 0.27995]
 
 # ============================================================================= #
-#                          VIDEOATTENTIONTARGET DATASET                         #
+#                                CHILDPLAY DATASET                              #
 # ============================================================================= #
-class VideoAttentionTargetDataset(Dataset):
+class ChildPlayDataset(Dataset):
     """
-    Loads the VideoAttentionTarget dataset (Chong et al., CVPR 2020) as multi-person, per-frame
-    samples: every row is a (frame, tracked-person) annotation, so we group all person-tracks
-    that share the same frame together and predict a heatmap/gaze_vec/inout for every one of them
-    (up to `max_people`), instead of picking a single tracked person per sample.
+    Loads the ChildPlay Gaze dataset (Tafasca et al., ICCV 2023) as multi-person, per-frame
+    samples: every row is a (clip, frame, person) annotation, so we group all people annotated in
+    the same frame together and predict a heatmap/gaze_vec/inout for every one of them (up to
+    `max_people`).
 
-    The dataset only ships an official train/test split. `val` is carved out of `train` by
-    holding out entire shows (no clip ever appears in both `train` and `val`), matching the split
-    used by the VSGaze release (Gupta et al., NeurIPS 2024): 51 clips across 3 shows, exactly
-    54513/3994 train/val frames.
+    ChildPlay ships official `train`/`val`/`test` annotation folders, used as-is. Only the
+    `inside_visible` and `outside_frame` gaze classes correspond to a definite in/out label (cf.
+    the dataset README); every other class (`gaze_shift`, `inside_occluded`, `inside_uncertain`,
+    `eyes_closed`, etc.) is unknown and mapped to -1, excluded from every loss/metric.
     """
 
-    VAL_SHOWS = {"Before_Sunrise", "Orange_is_the_New_Black", "Project_Runway"}
+    # 2 of the 95 source YouTube videos are no longer available; their 4 clips have no extracted images.
+    EXCLUDED_CLIPS = {
+        "js4wxP9HxG0_3496-3539",
+        "js4wxP9HxG0_3589-3760",
+        "w6oRoyTBmU4_3693-3871",
+        "w6oRoyTBmU4_1653-1939",
+    }
 
     def __init__(
         self,
@@ -50,7 +56,7 @@ class VideoAttentionTargetDataset(Dataset):
         transform: Union[Compose, None] = None,
         heatmap_sigma: int = 3,
         heatmap_size: int = 64,
-        max_people: int = 8,
+        max_people: int = 4,
         return_head_mask: bool = False,
     ):
         super().__init__()
@@ -72,31 +78,41 @@ class VideoAttentionTargetDataset(Dataset):
         self.length = len(self.paths)
 
     def load_annotations(self):
-        # Each *.txt file is a per-person track within a clip: [img_name, head_xmin, head_ymin, head_xmax, head_ymax, gaze_x, gaze_y]
-        # `train` and `val` both come from the `annotations/train` release (val is a show holdout); `test` uses `annotations/test`.
-        ann_split = "test" if self.split == "test" else "train"
-        columns = ["img_name", "head_xmin", "head_ymin", "head_xmax", "head_ymax", "gaze_x", "gaze_y"]
-        ann_files = sorted(glob.glob(os.path.join(self.root, "annotations", ann_split, "*", "*", "*.txt")))
+        clips_meta = pd.read_csv(os.path.join(self.root, "clips.csv"), usecols=["clip", "video_id"])
+        video_id_by_clip = dict(zip(clips_meta["clip"], clips_meta["video_id"]))
+
+        ann_files = sorted(glob.glob(os.path.join(self.root, "annotations", self.split, "*.csv")))
 
         dfs = []
         for ann_file in ann_files:
-            clip_dir = os.path.dirname(ann_file)
-            clip = os.path.basename(clip_dir)
-            # `images/` directories use underscores instead of spaces (unlike `annotations/`).
-            show = os.path.basename(os.path.dirname(clip_dir)).replace(" ", "_")
-
-            if self.split == "train" and show in self.VAL_SHOWS:
-                continue
-            if self.split == "val" and show not in self.VAL_SHOWS:
+            clip = os.path.splitext(os.path.basename(ann_file))[0]
+            if clip in self.EXCLUDED_CLIPS:
                 continue
 
-            df = pd.read_csv(ann_file, sep=",", names=columns, index_col=False, encoding="utf-8-sig")
-            df["path"] = df["img_name"].apply(lambda name: os.path.join(show, clip, name))
+            video_id = video_id_by_clip[clip]
+            # clip name = "{video_id}_{start_frame}-{end_frame}[-downsampled]"; `frame` in the csv
+            # is relative to the clip, and image files are named after the absolute frame number.
+            start_frame = int(clip[len(video_id) + 1 :].split("-")[0])
+
+            df = pd.read_csv(ann_file)
+            df["path"] = df["frame"].apply(
+                lambda frame, clip=clip, video_id=video_id, start_frame=start_frame: os.path.join(
+                    clip, f"{video_id}_{start_frame + frame - 1}.jpg"
+                )
+            )
             dfs.append(df)
 
         annotations = pd.concat(dfs, ignore_index=True)
-        # <-1, -1> gaze target means the target is outside the frame (cf. dataset README)
-        annotations["inout"] = (annotations["gaze_x"] != -1).astype(int)
+        annotations["head_xmin"] = annotations["bbox_x"]
+        annotations["head_ymin"] = annotations["bbox_y"]
+        annotations["head_xmax"] = annotations["bbox_x"] + annotations["bbox_width"]
+        annotations["head_ymax"] = annotations["bbox_y"] + annotations["bbox_height"]
+        # Only `inside_visible`/`outside_frame` map to a definite in/out label (cf. README); the
+        # remaining gaze classes (occluded, uncertain, gaze_shift, eyes_closed, ...) are unknown.
+        annotations["inout"] = -1
+        annotations.loc[annotations["gaze_class"] == "inside_visible", "inout"] = 1
+        annotations.loc[annotations["gaze_class"] == "outside_frame", "inout"] = 0
+
         return annotations.groupby("path")
 
     def __getitem__(self, index: int) -> Dict:
@@ -201,9 +217,9 @@ class VideoAttentionTargetDataset(Dataset):
 
 
 # ============================================================================= #
-#                        VIDEOATTENTIONTARGET DATAMODULE                        #
+#                              CHILDPLAY DATAMODULE                             #
 # ============================================================================= #
-class VideoAttentionTargetDataModule(pl.LightningDataModule):
+class ChildPlayDataModule(pl.LightningDataModule):
     def __init__(
         self,
         root: str,
@@ -211,7 +227,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
         image_size: Union[int, tuple] = (224, 224),
         heatmap_sigma: int = 3,
         heatmap_size: Union[int, tuple] = 64,
-        max_people: int = 8,
+        max_people: int = 4,
         return_head_mask: bool = False,
         num_workers: int = 4,
     ):
@@ -250,7 +266,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
                     Normalize(img_mean=IMG_MEAN, img_std=IMG_STD),
                 ]
             )
-            self.train_dataset = VideoAttentionTargetDataset(
+            self.train_dataset = ChildPlayDataset(
                 self.root,
                 "train",
                 train_transform,
@@ -267,7 +283,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
                     Normalize(img_mean=IMG_MEAN, img_std=IMG_STD),
                 ]
             )
-            self.val_dataset = VideoAttentionTargetDataset(
+            self.val_dataset = ChildPlayDataset(
                 self.root,
                 "val",
                 val_transform,
@@ -285,7 +301,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
                     Normalize(img_mean=IMG_MEAN, img_std=IMG_STD),
                 ]
             )
-            self.val_dataset = VideoAttentionTargetDataset(
+            self.val_dataset = ChildPlayDataset(
                 self.root,
                 "val",
                 val_transform,
@@ -303,7 +319,7 @@ class VideoAttentionTargetDataModule(pl.LightningDataModule):
                     Normalize(img_mean=IMG_MEAN, img_std=IMG_STD),
                 ]
             )
-            self.test_dataset = VideoAttentionTargetDataset(
+            self.test_dataset = ChildPlayDataset(
                 self.root,
                 "test",
                 test_transform,
