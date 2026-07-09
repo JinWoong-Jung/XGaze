@@ -114,11 +114,11 @@ class GazeDecoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Predict per-person gaze heatmaps and in/out-of-frame logits given image and gaze tokens.
-        One learnable query is instantiated per person (batched over `n`), seeded with that
-        person's own gaze token so that queries differ across people. Each query only ever sees
-        (a) the shared scene tokens (`image_context`, same for every person) and (b) that same
-        person's own gaze token (`gaze_tokens[:, i]`) - never another person's gaze token - so the
-        n people are processed fully independently of one another, just batched for efficiency.
+        One learnable query is instantiated per person (batched over `n`) without adding gaze-token
+        content at initialization. Each query then only ever sees (a) that same person's own gaze
+        token (`gaze_tokens[:, i]`) and (b) the shared scene tokens (`image_context`, same for every
+        person) - never another person's gaze token - so the n people are processed fully
+        independently of one another, just batched for efficiency.
 
         Arguments:
           image_tokens (torch.Tensor): the tokens encoding the scene image, shape (b, c, h, w)
@@ -133,7 +133,7 @@ class GazeDecoder(nn.Module):
         n = gaze_tokens.shape[1]
 
         image_context = image_tokens.view(b, ic, ih * iw).permute(0, 2, 1)  # (b, h*w, c)
-        queries = self.query_tokens.expand(b, n, -1) + gaze_tokens  # (b, n, c)
+        queries = self.query_tokens.expand(b, n, -1)  # (b, n, c)
         for block in self.blocks:
             queries = block(queries=queries, image_context=image_context, gaze_context=gaze_tokens)
 
@@ -198,16 +198,16 @@ class QueryGazeAttentionBlock(nn.Module):
     ) -> Tensor:
         b, n, c = queries.shape
 
-        # Each person's query independently attends to the shared scene tokens (no cross-person mixing here either).
-        queries = queries + self.cross_attn_query_to_image(q=queries, k=image_context, v=image_context)
-        queries = self.norm_image(queries)
-
-        # Attend to this person's OWN gaze token only: merge (b, n) into the attention batch so
+        # Attend to this person's OWN gaze token first: merge (b, n) into the attention batch so
         # query i only ever sees gaze_context i, never another person's gaze token.
         q_own = queries.reshape(b * n, 1, c)
         gaze_own = gaze_context.reshape(b * n, 1, c)
         queries = queries + self.cross_attn_query_to_gaze(q=q_own, k=gaze_own, v=gaze_own).reshape(b, n, c)
         queries = self.norm_gaze(queries)
+
+        # Each person's query independently attends to the shared scene tokens (no cross-person mixing here either).
+        queries = queries + self.cross_attn_query_to_image(q=queries, k=image_context, v=image_context)
+        queries = self.norm_image(queries)
 
         queries = queries + self.mlp(queries)
         queries = self.norm_mlp(queries)

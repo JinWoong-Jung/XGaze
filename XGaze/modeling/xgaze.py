@@ -221,13 +221,14 @@ class XGazeModule(pl.LightningModule):
             heatmap_loss = compute_heatmap_loss(gaze_heatmap_pred, gaze_heatmap_gt, inside_gt)
             angular_loss = compute_angular_loss(gaze_vec_pred, gaze_vec_gt, inside_gt)
 
-        if inout_pred is not None:
+        weight_inout = self.cfg.loss.get("weight_inout", 0.0)
+        if inout_pred is not None and weight_inout != 0:
             inout_loss = compute_inout_loss(inout_pred, inout_gt)
 
         total_loss = (
             self.cfg.loss.weight_heatmap * heatmap_loss +
             self.cfg.loss.weight_angular * angular_loss +
-            self.cfg.loss.get("weight_inout", 0.0) * inout_loss
+            weight_inout * inout_loss
         )
 
         logs = {
@@ -294,17 +295,17 @@ class XGazeModule(pl.LightningModule):
     def _forward_step(self, batch):
         """
         Runs the model and returns (heatmap_pred, gaze_vec_pred, inout_pred, inout_gt) at the
-        granularity appropriate for `self.dataset`: for `gazefollow` only the single annotated
-        target person (last slot) is kept, matching the dataset's single-target ground truth and
-        leaving that pipeline untouched; for the multi-person datasets every person slot is kept
-        since ground truth (heatmap/gaze_vec/inout) is annotated per person.
+        granularity appropriate for `self.dataset`: for `gazefollow`, heatmap/gaze-vector losses use
+        only the single annotated target person (last slot), while the matching in/out logit remains
+        available and is disabled through `loss.weight_inout: 0`; for the multi-person datasets every
+        person slot is kept since ground truth (heatmap/gaze_vec/inout) is annotated per person.
         """
         gaze_heatmap_pred, gaze_vec_pred, inout_pred = self(batch)
 
         if self.dataset == "gazefollow":
             gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
             gaze_vec_pred = gaze_vec_pred[:, -1, ...]  # (b, n, 2) >> (b, 2)
-            inout_pred_for_loss = None  # no per-person inout ground truth to supervise against
+            inout_pred_for_loss = inout_pred[:, -1]  # present for parity, but weighted out for GazeFollow
         else:
             inout_pred_for_loss = inout_pred
 
@@ -330,7 +331,7 @@ class XGazeModule(pl.LightningModule):
         # Logging losses
         self.log("loss/train/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=True, on_epoch=True)
         self.log("loss/train/angular", logs["angular_loss"], batch_size=ni, prog_bar=False, on_step=True, on_epoch=True)
-        if inout_pred_for_loss is not None:
+        if inout_pred_for_loss is not None and self.cfg.loss.get("weight_inout", 0.0) != 0:
             self.log("loss/train/inout", logs["inout_loss"], batch_size=n, prog_bar=False, on_step=True, on_epoch=True)
         self.log("loss/train", logs["total_loss"], batch_size=n, prog_bar=True, on_step=True, on_epoch=True)
 
@@ -365,7 +366,7 @@ class XGazeModule(pl.LightningModule):
         # Logging losses
         self.log("loss/val/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=False, on_epoch=True)
         self.log("loss/val/angular", logs["angular_loss"], batch_size=ni, prog_bar=False, on_step=False, on_epoch=True)
-        if inout_pred_for_loss is not None:
+        if inout_pred_for_loss is not None and self.cfg.loss.get("weight_inout", 0.0) != 0:
             self.log("loss/val/inout", logs["inout_loss"], batch_size=n, prog_bar=False, on_step=False, on_epoch=True)
         self.log("loss/val", logs["total_loss"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
 

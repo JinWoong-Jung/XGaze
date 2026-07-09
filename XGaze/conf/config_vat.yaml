@@ -21,9 +21,9 @@ project:
 # ------------------------------------------------------------------------------------------------------------------- #
 
 experiment:
-    name: xgaze-vat(zero-shot) # name of the wandb job
+    name: xgaze-vat(fine-tuning) # name of the wandb job
     group: null # name of the wandb group
-    task: test # combination of {train, val, test} separated by '+' sign
+    task: train+test # combination of {train, val, test} separated by '+' sign
     dataset: video_attention_target
     path: ${hydra:runtime.cwd} # to retrieve logs and checkpoints
 

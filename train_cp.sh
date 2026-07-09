@@ -10,7 +10,7 @@
 #SBATCH -e logs/%x_%j.err
 
 # ── Settings ──────────────────────────────────────────────────────────────── #
-TASKS="test"                              # train+test (finetune then test) | test (zero-shot test only)
+TASKS="train+test"                              # train+test (finetune then test) | test (zero-shot test only)
 WEIGHTS="/home/jinwoongjung/XGaze/checkpoints/best_gf.ckpt"       # ckpt to warm-start/eval from (eg. from train_gf.sh);
 
 python main.py --config-name=config_childplay \
