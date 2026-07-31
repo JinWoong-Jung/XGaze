@@ -8,6 +8,7 @@
 data/
 weights/
 checkpoints/
+experiments/
 
 # Project
 __pycache__/

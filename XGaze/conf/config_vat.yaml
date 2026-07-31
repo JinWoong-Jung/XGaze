@@ -52,18 +52,22 @@ model:
         token_dim: 768
         image_size: ${data.image_size}
         gaze_vec_dim: 2
-        encoder_depth: 12
-        encoder_num_heads: 12
-        encoder_num_global_tokens: 1
         decoder_depth: 2
         decoder_num_heads: 8
-        image_encoder_type: dinov3_hf # multimae, dinov3_hf
-        hf_image_encoder_name: facebook/dinov3-vitb16-pretrain-lvd1689m
-        hf_image_encoder_local_dir: /home/jinwoongjung/XGaze/weights/dinov3-vitb16
-        hf_image_encoder_trust_remote_code: True
+        image_encoder:
+            type: dinov3 # mae, dinov3
+            dinov3:
+                model_name: facebook/dinov3-vitl16-pretrain-lvd1689m
+                local_dir: /home/jinwoongjung/XGaze/weights/dinov3-vitl16
+                trust_remote_code: True
+                use_cls_token: True
+            mae:
+                encoder_depth: 12
+                encoder_num_heads: 12
+                encoder_num_global_tokens: 1
+                weights: /home/jinwoongjung/XGaze/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
     pretraining:
         gaze_backbone: /home/jinwoongjung/XGaze/weights/gaze360_resnet18.pt
-        image_encoder: /home/jinwoongjung/XGaze/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
     weights: null # /!\ null (default), or path to a checkpoint (overrides pretraining weights)
 
 # ------------------------------------------------------------------------------------------------------------------- #
@@ -76,7 +80,8 @@ loss:
 # ------------------------------------------------------------------------------------------------------------------- #
 
 optimizer:
-    lr: 2e-5
+    lr: 5e-6
+    lr_inout: 1e-3
     weight_decay: 3e-3
 
 # ------------------------------------------------------------------------------------------------------------------- #
@@ -91,7 +96,7 @@ train:
     seed: 10 # int or null for no seed
     matmul_precision: highest # highest (default), high, medium
     precision: bf16-mixed # 64 (double), 32 (full), 16 (16bit mixed), bf16-mixed (bfloat16 mixed). Defaults to 32.
-    epochs: 20
+    epochs: 10
     batch_size: 256
     accumulate_grad_batches: 1 # 1 (default, no accumulation)
     device: cuda
@@ -106,7 +111,7 @@ train:
         image_encoder: True
         gaze_decoder: False
     swa:
-        use: True
+        use: False
         lr: 1e-5
         epoch_start: 17
         annealing_epochs: 3
@@ -115,14 +120,14 @@ train:
 
 val:
     checkpoint: null
-    batch_size: 128
+    batch_size: 256
     device: ${train.device}
 
 # ------------------------------------------------------------------------------------------------------------------- #
 
 test:
     checkpoint: null
-    batch_size: 128
+    batch_size: 256
     device: ${train.device}
 
 # ------------------------------------------------------------------------------------------------------------------- #

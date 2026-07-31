@@ -229,28 +229,46 @@ class HuggingFaceDinoImageEncoder(nn.Module):
             return outputs[0]
         raise ValueError("Could not extract patch tokens from the Hugging Face DINO model output.")
 
+    @staticmethod
+    def _extract_global_token(outputs) -> torch.Tensor | None:
+        for attr in ("x_norm_clstoken", "cls_token", "pooler_output"):
+            if hasattr(outputs, attr):
+                token = getattr(outputs, attr)
+                if token is not None:
+                    return token.unsqueeze(1) if token.ndim == 2 else token
+        if isinstance(outputs, dict):
+            for key in ("x_norm_clstoken", "cls_token", "pooler_output"):
+                if key in outputs:
+                    token = outputs[key]
+                    if token is not None:
+                        return token.unsqueeze(1) if token.ndim == 2 else token
+        return None
+
     def _forward_backbone(self, images: torch.Tensor):
         try:
             return self.backbone(pixel_values=images, return_dict=True)
         except TypeError:
             return self.backbone(images)
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         images = images * self.input_std + self.input_mean
         images = (images - self.model_mean) / self.model_std
 
         outputs = self._forward_backbone(images)
         tokens = self._extract_tokens(outputs)
+        global_token = self._extract_global_token(outputs)
 
         if tokens.ndim == 4:
+            if global_token is not None:
+                global_token = self.proj(global_token)
             if tokens.shape[1] == self.token_dim:
-                return tokens
+                return tokens, global_token
             if tokens.shape[-1] == self.token_dim:
-                return tokens.permute(0, 3, 1, 2).contiguous()
+                return tokens.permute(0, 3, 1, 2).contiguous(), global_token
             if tokens.shape[1] == getattr(self.proj, "in_features", -1):
                 tokens = tokens.permute(0, 2, 3, 1).contiguous()
             tokens = self.proj(tokens)
-            return tokens.permute(0, 3, 1, 2).contiguous()
+            return tokens.permute(0, 3, 1, 2).contiguous(), global_token
 
         if tokens.ndim != 3:
             raise ValueError(f"Expected DINO tokens with 3 or 4 dims, received shape {tuple(tokens.shape)}.")
@@ -260,11 +278,15 @@ class HuggingFaceDinoImageEncoder(nn.Module):
                 f"received {tokens.shape[1]}."
             )
 
+        if tokens.shape[1] > self.num_patch_tokens:
+            global_token = tokens[:, :1, :]
         patch_tokens = tokens[:, -self.num_patch_tokens :, :]
+        if global_token is not None:
+            global_token = self.proj(global_token)
         patch_tokens = self.proj(patch_tokens)
         b, _, d = patch_tokens.shape
         s = self.feature_map_size
-        return patch_tokens.permute(0, 2, 1).view(b, d, s, s).contiguous()
+        return patch_tokens.permute(0, 2, 1).view(b, d, s, s).contiguous(), global_token
 
 
 class TransformerBlock(nn.Module):

@@ -13,7 +13,6 @@ import datetime as dt
 from termcolor import colored
 from abc import ABC, abstractmethod
 
-from hydra.types import RunMode
 from hydra.core.hydra_config import HydraConfig
 
 import torch
@@ -126,7 +125,7 @@ class Experiment(BaseExperiment):
     def init_logger(self):
         if self.cfg.wandb.log:
             hydra_cfg = HydraConfig.get()
-            save_dir = os.path.join(hydra_cfg.sweep.dir, hydra_cfg.sweep.subdir) if hydra_cfg.mode == RunMode.MULTIRUN else "./"
+            save_dir = hydra_cfg.runtime.output_dir
             exp_id = wandb.util.generate_id()
             logger = WandbLogger(
                 entity=self.cfg.wandb.entity,
@@ -148,8 +147,11 @@ class Experiment(BaseExperiment):
     def init_callbacks(self):
         callbacks = []
 
+        # Hydra writes the resolved config into this run directory.
+        checkpoint_dir = os.path.join(HydraConfig.get().runtime.output_dir, "checkpoints")
+
         checkpoint_cb = ModelCheckpoint(
-            dirpath="./checkpoints",
+            dirpath=checkpoint_dir,
             filename="best",  # custom: "{epoch:02d}-{step:02d}-{val_acc:.3f}"
             monitor=self.cfg.train.checkpointing.monitor,
             mode=self.cfg.train.checkpointing.mode,

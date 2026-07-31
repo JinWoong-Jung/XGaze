@@ -43,31 +43,41 @@ class XGazeModule(pl.LightningModule):
     def __init__(self, cfg):
         super().__init__()
 
-        self.model = XGaze(
-            image_size=cfg.model.XGaze.image_size,
-            patch_size=cfg.model.XGaze.patch_size, 
-            token_dim=cfg.model.XGaze.token_dim, 
-            gaze_vec_dim=cfg.model.XGaze.gaze_vec_dim, 
-            encoder_num_heads=cfg.model.XGaze.encoder_num_heads, 
-            encoder_depth=cfg.model.XGaze.encoder_depth, 
-            encoder_num_global_tokens=cfg.model.XGaze.encoder_num_global_tokens, 
-            decoder_depth=cfg.model.XGaze.decoder_depth, 
-            decoder_num_heads=cfg.model.XGaze.decoder_num_heads, 
-            heatmap_size=cfg.data.heatmap_size,
-            image_encoder_type=cfg.model.XGaze.get("image_encoder_type", "multimae"),
-            hf_image_encoder_name=cfg.model.XGaze.get("hf_image_encoder_name", "facebook/dinov3-vitb16-pretrain-lvd1689m"),
-            hf_image_encoder_local_dir=cfg.model.XGaze.get("hf_image_encoder_local_dir", None),
-            hf_image_encoder_trust_remote_code=cfg.model.XGaze.get("hf_image_encoder_trust_remote_code", True),
-        )
-
         self.cfg = cfg
-        self.feature_map_size = cfg.model.XGaze.image_size // cfg.model.XGaze.patch_size
-        
         self.dataset = cfg.experiment.dataset
         if self.dataset not in ("gazefollow", "video_attention_target", "childplay"):
             raise ValueError(
                 f"Dataset {self.dataset} not supported. Only `gazefollow`, `video_attention_target` and `childplay` are available."
             )
+
+        xgaze_cfg = cfg.model.XGaze
+        image_encoder_cfg = xgaze_cfg.get("image_encoder", {})
+        image_encoder_type = xgaze_cfg.get("image_encoder_type", image_encoder_cfg.get("type", "mae"))
+        image_encoder_type = {"mae": "multimae", "dinov3": "dinov3_hf"}.get(image_encoder_type, image_encoder_type)
+        multimae_cfg = image_encoder_cfg.get("mae", image_encoder_cfg.get("multimae", {}))
+        dinov3_cfg = image_encoder_cfg.get("dinov3", image_encoder_cfg.get("dinov3_hf", {}))
+
+        self.model = XGaze(
+            image_size=xgaze_cfg.image_size,
+            patch_size=xgaze_cfg.patch_size,
+            token_dim=xgaze_cfg.token_dim,
+            gaze_vec_dim=xgaze_cfg.gaze_vec_dim,
+            encoder_num_heads=xgaze_cfg.get("encoder_num_heads", multimae_cfg.get("encoder_num_heads", 12)),
+            encoder_depth=xgaze_cfg.get("encoder_depth", multimae_cfg.get("encoder_depth", 12)),
+            encoder_num_global_tokens=xgaze_cfg.get("encoder_num_global_tokens", multimae_cfg.get("encoder_num_global_tokens", 1)),
+            decoder_depth=xgaze_cfg.decoder_depth,
+            decoder_num_heads=xgaze_cfg.decoder_num_heads,
+            heatmap_size=cfg.data.heatmap_size,
+            image_encoder_type=image_encoder_type,
+            hf_image_encoder_name=xgaze_cfg.get("hf_image_encoder_name", dinov3_cfg.get("model_name", "facebook/dinov3-vitb16-pretrain-lvd1689m")),
+            hf_image_encoder_local_dir=xgaze_cfg.get("hf_image_encoder_local_dir", dinov3_cfg.get("local_dir", None)),
+            hf_image_encoder_trust_remote_code=xgaze_cfg.get("hf_image_encoder_trust_remote_code", dinov3_cfg.get("trust_remote_code", True)),
+            use_image_global_token=dinov3_cfg.get("use_cls_token", True),
+            predict_inout=self.dataset != "gazefollow",
+        )
+
+        self.feature_map_size = cfg.model.XGaze.image_size // cfg.model.XGaze.patch_size
+
         if self.dataset == "gazefollow":
             self.num_train_samples = cfg.data.gf.num_train_samples
         elif self.dataset == "video_attention_target":
@@ -109,7 +119,13 @@ class XGazeModule(pl.LightningModule):
         else:
             # Load ViT weights for Image Encoder (from MultiMAE)
             if self.model.image_encoder_type == "multimae":
-                vit_ckpt = torch.load(self.cfg.model.pretraining.image_encoder, map_location="cpu")
+                image_encoder_weights = self.cfg.model.get("pretraining", {}).get("image_encoder", None)
+                if image_encoder_weights is None:
+                    image_encoder_cfg = self.cfg.model.XGaze.get("image_encoder", {})
+                    image_encoder_weights = image_encoder_cfg.get("mae", image_encoder_cfg.get("multimae", {})).get("weights", None)
+                if image_encoder_weights is None:
+                    raise ValueError("MultiMAE image encoder selected, but no pretrained weight path was configured.")
+                vit_ckpt = torch.load(image_encoder_weights, map_location="cpu")
                 
                 vit_tokenizer_weights = OrderedDict([
                     (name.replace("input_adapters.rgb.", ""), value) 
@@ -135,7 +151,7 @@ class XGazeModule(pl.LightningModule):
                 
                 self.model.image_tokenizer.load_state_dict(vit_tokenizer_weights, strict=True)
                 self.model.encoder.encoder.load_state_dict(vit_encoder_weights, strict=False)
-                print(colored(f"Loaded Image Encoder weights from {self.cfg.model.pretraining.image_encoder}.", TERM_COLOR))
+                print(colored(f"Loaded Image Encoder weights from {image_encoder_weights}.", TERM_COLOR))
                 del vit_ckpt, vit_tokenizer_weights, vit_encoder_weights
             else:
                 print(colored(f"Using Hugging Face Image Encoder: {self.model.hf_image_encoder_name}.", TERM_COLOR))
@@ -185,10 +201,54 @@ class XGazeModule(pl.LightningModule):
             if self.model.encoder is not None:
                 self.freeze_module(self.model.encoder)
             if self.model.image_encoder is not None:
-                self.freeze_module(self.model.image_encoder)
+                if self.model.image_encoder_type == "dinov3_hf":
+                    self.freeze_module(self.model.image_encoder.backbone)
+                    for param in self.model.image_encoder.proj.parameters():
+                        param.requires_grad = True
+                    print(colored("Keeping the DINO feature projection layer trainable.", TERM_COLOR))
+                else:
+                    self.freeze_module(self.model.image_encoder)
         if self.cfg.train.freeze.gaze_decoder:
             print(colored(f"Freezing the Gaze Decoder layers.", TERM_COLOR))
             self.freeze_module(self.model.gaze_decoder)
+
+
+    def _dino_backbone_prefix(self):
+        # The DINOv3 backbone is frozen and always reloaded from its pretrained source in
+        # `_init_weights`, so it doesn't need to be persisted in checkpoints (it accounts for
+        # ~95% of checkpoint size). Only applies when the HF DINOv3 encoder is in use.
+        if self.model.image_encoder_type == "dinov3_hf" and self.model.image_encoder is not None:
+            return "model.image_encoder.backbone."
+        return None
+
+    def _strip_dino_backbone(self, state_dict, prefix):
+        return OrderedDict(
+            (name, value) for name, value in state_dict.items() if not name.startswith(prefix)
+        )
+
+    def on_save_checkpoint(self, checkpoint):
+        prefix = self._dino_backbone_prefix()
+        if prefix is None:
+            return
+        checkpoint["state_dict"] = self._strip_dino_backbone(checkpoint["state_dict"], prefix)
+        # The SWA callback keeps its own full copy of the model weights; strip it there too.
+        swa_state = checkpoint.get("callbacks", {}).get("StochasticWeightAveraging")
+        if swa_state is not None and swa_state.get("average_model_state") is not None:
+            swa_state["average_model_state"] = self._strip_dino_backbone(swa_state["average_model_state"], prefix)
+
+    def on_load_checkpoint(self, checkpoint):
+        prefix = self._dino_backbone_prefix()
+        if prefix is None:
+            return
+        # Re-inject the (already loaded, pretrained) backbone weights before Lightning restores
+        # the state dict, so both the model and the SWA callback see a complete state dict.
+        backbone_state = OrderedDict(
+            (f"{prefix}{name}", value) for name, value in self.model.image_encoder.backbone.state_dict().items()
+        )
+        checkpoint["state_dict"].update(backbone_state)
+        swa_state = checkpoint.get("callbacks", {}).get("StochasticWeightAveraging")
+        if swa_state is not None and swa_state.get("average_model_state") is not None:
+            swa_state["average_model_state"].update(backbone_state)
 
 
     def forward(self, batch):
@@ -241,12 +301,33 @@ class XGazeModule(pl.LightningModule):
 
     
     def configure_optimizers(self):
-        # Optimizer
-        optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, self.parameters()), 
-            lr=self.cfg.optimizer.lr, 
-            weight_decay=self.cfg.optimizer.weight_decay
-        ) 
+        lr = self.cfg.optimizer.get("lr_non_inout", self.cfg.optimizer.lr)
+        lr_inout = self.cfg.optimizer.get("lr_inout", None)
+        inout_decoder = self.model.gaze_decoder.inout_decoder
+
+        if lr_inout is not None and inout_decoder is not None:
+            inout_params = []
+            other_params = []
+            for name, param in self.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if name.startswith("model.gaze_decoder.inout_decoder."):
+                    inout_params.append(param)
+                else:
+                    other_params.append(param)
+
+            param_groups = []
+            if other_params:
+                param_groups.append({"params": other_params, "lr": lr})
+            if inout_params:
+                param_groups.append({"params": inout_params, "lr": lr_inout})
+            optimizer = optim.AdamW(param_groups, weight_decay=self.cfg.optimizer.weight_decay)
+        else:
+            optimizer = optim.AdamW(
+                filter(lambda p: p.requires_grad, self.parameters()),
+                lr=self.cfg.optimizer.lr,
+                weight_decay=self.cfg.optimizer.weight_decay,
+            )
         
         # Scheduler: Cosine Annealing with Warmup or None
         if self.cfg.scheduler.type == "cosine_warmup":
@@ -285,8 +366,12 @@ class XGazeModule(pl.LightningModule):
                 self.model.encoder.apply(self._set_batchnorm_eval)
                 self.model.encoder.apply(self._set_dropout_eval)
             if self.model.image_encoder is not None:
-                self.model.image_encoder.apply(self._set_batchnorm_eval)
-                self.model.image_encoder.apply(self._set_dropout_eval)
+                if self.model.image_encoder_type == "dinov3_hf":
+                    self.model.image_encoder.backbone.apply(self._set_batchnorm_eval)
+                    self.model.image_encoder.backbone.apply(self._set_dropout_eval)
+                else:
+                    self.model.image_encoder.apply(self._set_batchnorm_eval)
+                    self.model.image_encoder.apply(self._set_dropout_eval)
         if self.cfg.train.freeze.gaze_decoder:
             self.model.gaze_decoder.apply(self._set_batchnorm_eval)
             self.model.gaze_decoder.apply(self._set_dropout_eval)
@@ -295,17 +380,16 @@ class XGazeModule(pl.LightningModule):
     def _forward_step(self, batch):
         """
         Runs the model and returns (heatmap_pred, gaze_vec_pred, inout_pred, inout_gt) at the
-        granularity appropriate for `self.dataset`: for `gazefollow`, heatmap/gaze-vector losses use
-        only the single annotated target person (last slot), while the matching in/out logit remains
-        available and is disabled through `loss.weight_inout: 0`; for the multi-person datasets every
-        person slot is kept since ground truth (heatmap/gaze_vec/inout) is annotated per person.
+        granularity appropriate for `self.dataset`: for `gazefollow`, only the single annotated
+        target person (last slot) is kept and no in/out decoder is instantiated; for the multi-person
+        datasets every person slot is kept since ground truth is annotated per person.
         """
         gaze_heatmap_pred, gaze_vec_pred, inout_pred = self(batch)
 
         if self.dataset == "gazefollow":
             gaze_heatmap_pred = gaze_heatmap_pred[:, -1, ...]  # (b, n, 64, 64) >> (b, 64, 64)
             gaze_vec_pred = gaze_vec_pred[:, -1, ...]  # (b, n, 2) >> (b, 2)
-            inout_pred_for_loss = inout_pred[:, -1]  # present for parity, but weighted out for GazeFollow
+            inout_pred_for_loss = None
         else:
             inout_pred_for_loss = inout_pred
 
@@ -437,6 +521,8 @@ class XGaze(nn.Module):
         hf_image_encoder_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
         hf_image_encoder_local_dir: str | None = None,
         hf_image_encoder_trust_remote_code: bool = True,
+        use_image_global_token: bool = True,
+        predict_inout: bool = True,
     ):
         super().__init__()
         
@@ -444,8 +530,10 @@ class XGaze(nn.Module):
         self.image_embedding_size = image_size // patch_size
         self.heatmap_size = heatmap_size
         self.encoder_num_global_tokens = encoder_num_global_tokens
+        image_encoder_type = {"mae": "multimae", "dinov3": "dinov3_hf"}.get(image_encoder_type, image_encoder_type)
         self.image_encoder_type = image_encoder_type
         self.hf_image_encoder_name = hf_image_encoder_name
+        self.use_image_global_token = use_image_global_token
 
         self.gaze_encoder = GazeEncoder(
             token_dim=token_dim, 
@@ -497,6 +585,7 @@ class XGaze(nn.Module):
             num_heads=decoder_num_heads,
             feature_map_size=self.image_embedding_size,
             heatmap_size=heatmap_size,
+            predict_inout=predict_inout,
         )
 
 
@@ -516,10 +605,17 @@ class XGaze(nn.Module):
             image_tokens = self.encoder(image_tokens, return_all_layers=False)  # (b, t+gt, d) / gt = num global tokens
             image_tokens = image_tokens[:, :-self.encoder_num_global_tokens, :] # (b, t, d)
             image_tokens = image_tokens.permute(0, 2, 1).view(b, d, s, s) # (b, t, d) >> (b, d, t) >> (b, d, s, s)
+            image_global_token = None
         else:
-            image_tokens = self.image_encoder(sample["image"])  # (b, d, h, w)
+            image_tokens, image_global_token = self.image_encoder(sample["image"])  # (b, d, h, w), (b, 1, d)
+            if not self.use_image_global_token:
+                image_global_token = None
         
         # Decode Gaze Target =====================================================
-        gaze_heatmap, inout_logits = self.gaze_decoder(image_tokens, gaze_tokens)  # (b, n, hm_h, hm_w), (b, n)
+        gaze_heatmap, inout_logits = self.gaze_decoder(
+            image_tokens,
+            gaze_tokens,
+            image_global_token=image_global_token,
+        )  # (b, n, hm_h, hm_w), (b, n)
 
         return gaze_heatmap, gaze_vec, inout_logits

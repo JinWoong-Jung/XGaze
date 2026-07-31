@@ -25,6 +25,7 @@ class GazeDecoder(nn.Module):
         num_heads: int,
         feature_map_size: int,
         heatmap_size: int,
+        predict_inout: bool = True,
     ) -> None:
         """
         Predicts gaze heatmaps given an image and gaze tokens, using a transformer architecture.
@@ -41,6 +42,7 @@ class GazeDecoder(nn.Module):
         self.num_heads = num_heads
         self.feature_map_size = feature_map_size
         self.heatmap_size = heatmap_size
+        self.predict_inout = predict_inout
 
         self.query_tokens = nn.Parameter(torch.zeros(1, 1, token_dim))
         nn.init.trunc_normal_(self.query_tokens, std=0.02)
@@ -66,8 +68,11 @@ class GazeDecoder(nn.Module):
         # MLP for heatmap embeddings
         self.heatmap_mlp = MLP(token_dim, token_dim, heatmap_emb_dim, 3)
 
-        # 2-layer MLP head predicting in/out-of-frame per person query
-        self.inout_decoder = MLP(token_dim, token_dim, 1, 2)
+        if self.predict_inout:
+            # 2-layer MLP head predicting in/out-of-frame per person query
+            self.inout_decoder = MLP(token_dim, token_dim, 1, 2)
+        else:
+            self.inout_decoder = None
 
     @staticmethod
     def _build_upscaler(token_dim: int, feature_map_size: int, heatmap_size: int) -> tuple[nn.Sequential, int]:
@@ -111,9 +116,10 @@ class GazeDecoder(nn.Module):
         self,
         image_tokens: torch.Tensor,
         gaze_tokens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        image_global_token: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
-        Predict per-person gaze heatmaps and in/out-of-frame logits given image and gaze tokens.
+        Predict per-person gaze heatmaps and optional in/out-of-frame logits given image and gaze tokens.
         One learnable query is instantiated per person (batched over `n`) without adding gaze-token
         content at initialization. Each query then only ever sees (a) that same person's own gaze
         token (`gaze_tokens[:, i]`) and (b) the shared scene tokens (`image_context`, same for every
@@ -121,18 +127,23 @@ class GazeDecoder(nn.Module):
         independently of one another, just batched for efficiency.
 
         Arguments:
-          image_tokens (torch.Tensor): the tokens encoding the scene image, shape (b, c, h, w)
+          image_tokens (torch.Tensor): the patch tokens encoding the scene image, shape (b, c, h, w)
           gaze_tokens (torch.Tensor): the tokens encoding people's head/gaze information, shape (b, n, c)
+          image_global_token (torch.Tensor | None): optional CLS/global scene token, shape (b, 1, c)
 
         Returns:
-          tuple[torch.Tensor, torch.Tensor]: batched predicted gaze heatmaps (b, n, hm_h, hm_w)
-          and in/out-of-frame logits (b, n)
+          tuple[torch.Tensor, torch.Tensor | None]: batched predicted gaze heatmaps (b, n, hm_h, hm_w)
+          and optional in/out-of-frame logits (b, n)
         """
 
         b, ic, ih, iw = image_tokens.shape  # (b, c, h, w)
         n = gaze_tokens.shape[1]
 
         image_context = image_tokens.view(b, ic, ih * iw).permute(0, 2, 1)  # (b, h*w, c)
+        if image_global_token is not None:
+            if image_global_token.ndim == 2:
+                image_global_token = image_global_token.unsqueeze(1)
+            image_context = torch.cat([image_global_token, image_context], dim=1)  # (b, 1+h*w, c)
         queries = self.query_tokens.expand(b, n, -1)  # (b, n, c)
         for block in self.blocks:
             queries = block(queries=queries, image_context=image_context, gaze_context=gaze_tokens)
@@ -143,7 +154,7 @@ class GazeDecoder(nn.Module):
         gaze_heatmap_emb = self.heatmap_mlp(queries)  # (b, n, c')
         gaze_heatmap = torch.einsum("bnc,bchw->bnhw", gaze_heatmap_emb, upscaled_image_tokens)  # (b, n, hm_h, hm_w)
 
-        inout_logits = self.inout_decoder(queries).squeeze(-1)  # (b, n)
+        inout_logits = self.inout_decoder(queries).squeeze(-1) if self.inout_decoder is not None else None  # (b, n)
 
         return gaze_heatmap, inout_logits
 
