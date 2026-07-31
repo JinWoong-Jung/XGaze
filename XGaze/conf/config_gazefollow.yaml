@@ -71,6 +71,14 @@ loss:
     weight_heatmap: 100
     weight_angular: 3
     weight_inout: 0
+    weight_ooc: 0 # out-of-cone penalty; 0 disables it. Calibrate before raising (see `log_ooc`).
+    log_ooc: False # log the raw OOC term without weighting it into the loss, to pick `weight_ooc`
+    ooc:
+        theta_deg: 60.0 # cone aperture
+        alpha: 30.0 # cone boundary sharpness, relative to the head-to-target distance
+        normalize_alpha: True # scale alpha by 1/||g-h||; False reproduces the paper's fixed alpha
+        tau: 1.0 # spatial-softmax temperature; raise if the softmax over logits is near one-hot
+        min_gaze_dist: 0.05 # skip samples whose target is this close to the head center
 
 # ------------------------------------------------------------------------------------------------------------------- #
 

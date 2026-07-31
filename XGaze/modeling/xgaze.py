@@ -26,7 +26,7 @@ import pytorch_lightning as pl
 
 from XGaze.modeling.encoder import GazeEncoder, HuggingFaceDinoImageEncoder, SpatialInputTokenizer, ViTEncoder
 from XGaze.modeling.decoder import GazeDecoder
-from XGaze.losses import compute_heatmap_loss, compute_angular_loss, compute_inout_loss
+from XGaze.losses import compute_heatmap_loss, compute_angular_loss, compute_inout_loss, compute_ooc_loss
 from XGaze.metrics import Distance, GFTestAUC, GFTestDistance, TestAUC
 from XGaze.utils.common import spatial_argmax2d, dark_coordinate_decoding
 
@@ -263,11 +263,16 @@ class XGazeModule(pl.LightningModule):
         gaze_heatmap_pred,
         gaze_vec_pred,
         inout_pred=None,
+        head_center_gt=None,
+        gaze_pt_gt=None,
     ):
         """
         `inout_gt` is in {0, 1} for `gazefollow` (single target person) and in {-1, 0, 1} for the
         multi-person datasets (`video_attention_target`/`childplay`), where -1 marks unknown gaze
         class or padded person slots (see the dataset READMEs) and is excluded from every loss term.
+
+        `head_center_gt`/`gaze_pt_gt` are only needed by the out-of-cone penalty; when they are
+        omitted (or the penalty is both disabled and unlogged) the OOC term is skipped entirely.
         """
 
         device = gaze_heatmap_pred.device
@@ -275,6 +280,7 @@ class XGazeModule(pl.LightningModule):
         heatmap_loss = torch.tensor(0.0, device=device)
         angular_loss = torch.tensor(0.0, device=device)
         inout_loss = torch.tensor(0.0, device=device)
+        ooc_loss = torch.tensor(0.0, device=device)
 
         inside_gt = inout_gt.clamp(min=0)
         if torch.sum(inside_gt) > 0:  # to avoid case where all samples of the batch are outside (i.e. division by 0)
@@ -285,19 +291,65 @@ class XGazeModule(pl.LightningModule):
         if inout_pred is not None and weight_inout != 0:
             inout_loss = compute_inout_loss(inout_pred, inout_gt)
 
+        # Out-of-cone penalty. `log_ooc` lets a run measure the raw term with `weight_ooc: 0`, which
+        # is how its weight is calibrated against the (much larger) heatmap term.
+        weight_ooc = self.cfg.loss.get("weight_ooc", 0.0)
+        ooc_count = 0
+        if self._ooc_active() and head_center_gt is not None:
+            ooc_cfg = self.cfg.loss.get("ooc", {})
+            ooc_loss, ooc_count = compute_ooc_loss(
+                gaze_heatmap_pred,
+                head_center_gt,
+                gaze_pt_gt,
+                inout_gt,
+                theta_deg=ooc_cfg.get("theta_deg", 60.0),
+                alpha=ooc_cfg.get("alpha", 30.0),
+                tau=ooc_cfg.get("tau", 1.0),
+                min_gaze_dist=ooc_cfg.get("min_gaze_dist", 0.05),
+                normalize_alpha=ooc_cfg.get("normalize_alpha", True),
+                return_count=True,
+            )
+
         total_loss = (
             self.cfg.loss.weight_heatmap * heatmap_loss +
             self.cfg.loss.weight_angular * angular_loss +
-            weight_inout * inout_loss
+            weight_inout * inout_loss +
+            weight_ooc * ooc_loss
         )
 
         logs = {
             "heatmap_loss": heatmap_loss.item(),
             "angular_loss": angular_loss.item(),
             "inout_loss": inout_loss.item(),
+            "ooc_loss": ooc_loss.item(),
+            "ooc_count": ooc_count,  # eligible entries, the correct batch_size for logging the term
             "total_loss": total_loss.item(),
         }
         return total_loss, logs
+
+    def _ooc_active(self):
+        """Whether the out-of-cone term should be computed: either it is weighted into the total
+        loss, or the run is measuring it with `weight_ooc: 0` to calibrate that weight."""
+        return self.cfg.loss.get("weight_ooc", 0.0) != 0 or self.cfg.loss.get("log_ooc", False)
+
+    def _ooc_targets(self, batch):
+        """
+        Return `(head_center, gaze_pt)` aligned with the leading dims of the predictions produced by
+        `_forward_step`: (b, 2) for `gazefollow`, where only the last person slot is annotated, and
+        (b, n, 2) for the multi-person datasets, where every slot carries its own ground truth.
+
+        Returns `(None, None)` when the batch lacks the tensors (eg. the GazeFollow test split, whose
+        `gaze_pt` holds multiple annotators per image).
+        """
+        if "head_centers" not in batch or "gaze_pt" not in batch:
+            return None, None
+
+        head_center, gaze_pt = batch["head_centers"], batch["gaze_pt"]
+        if self.dataset == "gazefollow":
+            head_center = head_center[:, -1, :]  # (b, n, 2) >> (b, 2)
+        if head_center.shape != gaze_pt.shape:
+            return None, None
+        return head_center, gaze_pt
 
     
     def configure_optimizers(self):
@@ -403,6 +455,7 @@ class XGazeModule(pl.LightningModule):
         ni = int(batch["inout"].clamp(min=0).sum().item())
 
         # Compute loss
+        head_center_gt, gaze_pt_gt = self._ooc_targets(batch)
         loss, logs = self.compute_loss(
             batch["gaze_heatmap"],
             batch["gaze_vec"],
@@ -410,6 +463,8 @@ class XGazeModule(pl.LightningModule):
             gaze_heatmap_pred,
             gaze_vec_pred,
             inout_pred_for_loss,
+            head_center_gt,
+            gaze_pt_gt,
         )
 
         # Logging losses
@@ -417,6 +472,9 @@ class XGazeModule(pl.LightningModule):
         self.log("loss/train/angular", logs["angular_loss"], batch_size=ni, prog_bar=False, on_step=True, on_epoch=True)
         if inout_pred_for_loss is not None and self.cfg.loss.get("weight_inout", 0.0) != 0:
             self.log("loss/train/inout", logs["inout_loss"], batch_size=n, prog_bar=False, on_step=True, on_epoch=True)
+        # Weighted by the eligible count, which `min_gaze_dist` makes stricter than the in-frame count.
+        if self._ooc_active() and logs["ooc_count"] > 0:
+            self.log("loss/train/ooc", logs["ooc_loss"], batch_size=logs["ooc_count"], prog_bar=False, on_step=True, on_epoch=True)
         self.log("loss/train", logs["total_loss"], batch_size=n, prog_bar=True, on_step=True, on_epoch=True)
 
         return {"loss": loss}
@@ -435,6 +493,7 @@ class XGazeModule(pl.LightningModule):
         gaze_pt_pred = spatial_argmax2d(gaze_heatmap_prob.reshape(-1, *hm_shape[-2:]), normalize=True).reshape(*hm_shape[:-2], 2)
 
         # Compute loss
+        head_center_gt, gaze_pt_gt = self._ooc_targets(batch)
         loss, logs = self.compute_loss(
             batch["gaze_heatmap"],
             batch["gaze_vec"],
@@ -442,6 +501,8 @@ class XGazeModule(pl.LightningModule):
             gaze_heatmap_pred,
             gaze_vec_pred,
             inout_pred_for_loss,
+            head_center_gt,
+            gaze_pt_gt,
         )
 
         # Update metrics
@@ -452,6 +513,8 @@ class XGazeModule(pl.LightningModule):
         self.log("loss/val/angular", logs["angular_loss"], batch_size=ni, prog_bar=False, on_step=False, on_epoch=True)
         if inout_pred_for_loss is not None and self.cfg.loss.get("weight_inout", 0.0) != 0:
             self.log("loss/val/inout", logs["inout_loss"], batch_size=n, prog_bar=False, on_step=False, on_epoch=True)
+        if self._ooc_active() and logs["ooc_count"] > 0:
+            self.log("loss/val/ooc", logs["ooc_loss"], batch_size=logs["ooc_count"], prog_bar=False, on_step=False, on_epoch=True)
         self.log("loss/val", logs["total_loss"], batch_size=n, prog_bar=True, on_step=False, on_epoch=True)
 
         # Logging metrics
