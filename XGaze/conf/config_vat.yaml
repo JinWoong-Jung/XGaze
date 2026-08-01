@@ -54,6 +54,7 @@ model:
         gaze_vec_dim: 2
         decoder_depth: 2
         decoder_num_heads: 8
+        use_gaze_attention_bias: False # tilt scene cross-attention towards the predicted gaze direction
         image_encoder:
             type: dinov3 # mae, dinov3
             dinov3:

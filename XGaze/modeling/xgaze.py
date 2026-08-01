@@ -74,6 +74,7 @@ class XGazeModule(pl.LightningModule):
             hf_image_encoder_trust_remote_code=xgaze_cfg.get("hf_image_encoder_trust_remote_code", dinov3_cfg.get("trust_remote_code", True)),
             use_image_global_token=dinov3_cfg.get("use_cls_token", True),
             predict_inout=self.dataset != "gazefollow",
+            use_gaze_attention_bias=xgaze_cfg.get("use_gaze_attention_bias", False),
         )
 
         self.feature_map_size = cfg.model.XGaze.image_size // cfg.model.XGaze.patch_size
@@ -586,9 +587,11 @@ class XGaze(nn.Module):
         hf_image_encoder_trust_remote_code: bool = True,
         use_image_global_token: bool = True,
         predict_inout: bool = True,
+        use_gaze_attention_bias: bool = False,
     ):
         super().__init__()
-        
+
+        self.use_gaze_attention_bias = use_gaze_attention_bias
         self.image_size = image_size
         self.image_embedding_size = image_size // patch_size
         self.heatmap_size = heatmap_size
@@ -675,10 +678,27 @@ class XGaze(nn.Module):
                 image_global_token = None
         
         # Decode Gaze Target =====================================================
+        head_center, gaze_direction = None, None
+        if self.use_gaze_attention_bias:
+            # `gaze_vec` is the encoder's own direction estimate, so the prior is available at
+            # inference too - unlike the out-of-cone penalty, which builds its cone from ground
+            # truth and therefore only exists during training.
+            head_bboxes = sample["head_bboxes"]  # (b, n, 4), normalized (xmin, ymin, xmax, ymax)
+            head_center = torch.stack(
+                [
+                    (head_bboxes[..., 0] + head_bboxes[..., 2]) / 2,
+                    (head_bboxes[..., 1] + head_bboxes[..., 3]) / 2,
+                ],
+                dim=-1,
+            )  # (b, n, 2)
+            gaze_direction = gaze_vec
+
         gaze_heatmap, inout_logits = self.gaze_decoder(
             image_tokens,
             gaze_tokens,
             image_global_token=image_global_token,
+            head_center=head_center,
+            gaze_direction=gaze_direction,
         )  # (b, n, hm_h, hm_w), (b, n)
 
         return gaze_heatmap, gaze_vec, inout_logits
