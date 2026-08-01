@@ -328,6 +328,25 @@ class XGazeModule(pl.LightningModule):
         }
         return total_loss, logs
 
+    def _log_gaze_bias_scales(self, batch_size):
+        """
+        Log each decoder block's gaze-attention bias scale. These start at zero, so their trajectory
+        is what says whether the model chose to rely on the predicted gaze direction at all: staying
+        near zero means the prior was not worth using, which is a different outcome from using it
+        and not gaining.
+        """
+        if not self.model.use_gaze_attention_bias:
+            return
+        for i, block in enumerate(self.model.gaze_decoder.blocks):
+            self.log(
+                f"gaze_bias_scale/block_{i}",
+                block.gaze_bias_scale.detach().squeeze(),
+                batch_size=batch_size,
+                prog_bar=False,
+                on_step=False,
+                on_epoch=True,
+            )
+
     def _ooc_active(self):
         """Whether the out-of-cone term should be computed: either it is weighted into the total
         loss, or the run is measuring it with `weight_ooc: 0` to calibrate that weight."""
@@ -477,6 +496,7 @@ class XGazeModule(pl.LightningModule):
         if self._ooc_active() and logs["ooc_count"] > 0:
             self.log("loss/train/ooc", logs["ooc_loss"], batch_size=logs["ooc_count"], prog_bar=False, on_step=True, on_epoch=True)
         self.log("loss/train", logs["total_loss"], batch_size=n, prog_bar=True, on_step=True, on_epoch=True)
+        self._log_gaze_bias_scales(batch_size=n)
 
         return {"loss": loss}
 

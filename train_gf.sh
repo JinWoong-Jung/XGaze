@@ -11,11 +11,11 @@
 
 # ── Settings ──────────────────────────────────────────────────────────────── #
 TASKS="train+test"                            # train+test (train from scratch then test) | test (zero-shot test only)
-EXPERIMENT_NAME="GF_layer-3_dim-768_new_hm"
+EXPERIMENT_NAME="GF_layer-3_dim-768_attnbias"
 
 TOKEN_DIM="768"                               # Shared DINO/gaze/decoder token dimension
 DECODER_DEPTH="3"                             # Number of cross-attention decoder blocks
-GAZE_ATTN_BIAS="False"                        # Tilt scene cross-attention towards the predicted gaze direction
+GAZE_ATTN_BIAS="True"                         # Tilt scene cross-attention towards the predicted gaze direction
 
 LR="2e-4"
 
