@@ -208,6 +208,21 @@ class XGazeModule(pl.LightningModule):
             TERM_COLOR,
         ))
 
+        # Putting trainable weights inside the backbone forces autograd to keep every layer's
+        # activations, which it previously discarded because nothing there needed a gradient. At
+        # batch 256 that took the encoder from ~36 GB to ~279 GB and ran the GPU out of memory.
+        # Recomputing the activations in the backward pass brings it back to ~68 GB.
+        # `use_reentrant=False` is required: the backbone's input does not require grad, and the
+        # reentrant implementation would silently produce no gradients for the adapters.
+        if lora_cfg.get("gradient_checkpointing", True):
+            self.model.image_encoder.backbone.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+            print(colored(
+                "Enabled gradient checkpointing on the Image Encoder (trades ~30% step time for "
+                "the activation memory LoRA would otherwise need).", TERM_COLOR,
+            ))
+
     
     def _set_batchnorm_eval(self, module):
         if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):

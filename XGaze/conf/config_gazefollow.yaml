@@ -65,9 +65,10 @@ model:
         use: False
         r: 8 # rank of the low-rank residual
         alpha: 16 # residual is scaled by alpha / r
-        dropout: 0.0 # dropout on the adapter input
-        target_modules: [q_proj, v_proj] # attention: q_proj, k_proj, v_proj, o_proj; mlp: up_proj, down_proj
+        dropout: 0.05 # dropout on the adapter input
+        target_modules: [q_proj, k_proj, v_proj, o_proj] # attention: q_proj, k_proj, v_proj, o_proj; mlp: up_proj, down_proj
         last_n_layers: -1 # adapt only the last N blocks, or -1 for all of them
+        gradient_checkpointing: True # required at batch 256: adapters force the backbone to keep activations
     pretraining:
         gaze_backbone: /home/jinwoongjung/XGaze/weights/gaze360_resnet18.pt
     weights: null # /!\ null (default), or path to a checkpoint (overrides pretraining weights)
