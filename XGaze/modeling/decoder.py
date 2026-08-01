@@ -10,7 +10,6 @@ import math
 from typing import Type
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 
 
@@ -76,42 +75,6 @@ class GazeDecoder(nn.Module):
             self.inout_decoder = None
 
     @staticmethod
-    def build_gaze_direction_score(
-        head_center: Tensor, gaze_direction: Tensor, feature_map_size: int, eps: float = 1e-6
-    ) -> Tensor:
-        """
-        Score every scene token by how well it lines up with the direction a person is looking.
-
-        The score is the cosine between the predicted gaze direction and the direction from the
-        head to that token, so it is in [-1, 1]: +1 straight ahead, 0 to the side, -1 behind. It is
-        deliberately scale-free. The out-of-cone penalty can normalise by the head-to-target
-        distance because it is supervised and knows the ground-truth target; here only a unit
-        direction is available at inference time, so there is no distance to normalise by and an
-        angular score is the only well-defined choice.
-
-        Token (i, j) sits at normalized coordinate ((j + 0.5) / s, (i + 0.5) / s) - patch centres,
-        unlike the heatmap grid, whose cells are sample points aligned with `generate_gaze_heatmap`.
-
-        Arguments:
-          head_center: normalized head centres, shape (b, n, 2) in (x, y) order.
-          gaze_direction: predicted gaze directions, shape (b, n, 2) in (x, y) order. Need not be
-            unit length; it is renormalised here.
-          feature_map_size: spatial size `s` of the (square) scene token grid.
-
-        Returns:
-          torch.Tensor: scores of shape (b, n, s * s), ordered to match the flattened scene tokens.
-        """
-        device, dtype = head_center.device, head_center.dtype
-        coords = (torch.arange(feature_map_size, device=device, dtype=dtype) + 0.5) / feature_map_size
-        grid_x, grid_y = torch.meshgrid(coords, coords, indexing="xy")  # both (s, s)
-        grid = torch.stack([grid_x, grid_y], dim=-1).flatten(0, 1)  # (s*s, 2), row-major like the tokens
-
-        direction = gaze_direction / (gaze_direction.norm(p=2, dim=-1, keepdim=True) + eps)  # (b, n, 2)
-        offset = grid - head_center.unsqueeze(-2)  # (b, n, s*s, 2)
-        offset = offset / (offset.norm(p=2, dim=-1, keepdim=True) + eps)
-        return (offset * direction.unsqueeze(-2)).sum(dim=-1)  # (b, n, s*s)
-
-    @staticmethod
     def _build_upscaler(token_dim: int, feature_map_size: int, heatmap_size: int) -> tuple[nn.Sequential, int]:
         if heatmap_size % feature_map_size != 0:
             raise ValueError(
@@ -154,8 +117,6 @@ class GazeDecoder(nn.Module):
         image_tokens: torch.Tensor,
         gaze_tokens: torch.Tensor,
         image_global_token: torch.Tensor | None = None,
-        head_center: torch.Tensor | None = None,
-        gaze_direction: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         Predict per-person gaze heatmaps and optional in/out-of-frame logits given image and gaze tokens.
@@ -169,11 +130,6 @@ class GazeDecoder(nn.Module):
           image_tokens (torch.Tensor): the patch tokens encoding the scene image, shape (b, c, h, w)
           gaze_tokens (torch.Tensor): the tokens encoding people's head/gaze information, shape (b, n, c)
           image_global_token (torch.Tensor | None): optional CLS/global scene token, shape (b, 1, c)
-          head_center (torch.Tensor | None): normalized head centres, shape (b, n, 2). Required
-            together with `gaze_direction` to enable the gaze-directed attention prior.
-          gaze_direction (torch.Tensor | None): predicted gaze directions, shape (b, n, 2). When
-            supplied with `head_center`, each block tilts its scene attention towards tokens lying
-            in that direction, by a per-block learned amount that starts at zero.
 
         Returns:
           tuple[torch.Tensor, torch.Tensor | None]: batched predicted gaze heatmaps (b, n, hm_h, hm_w)
@@ -188,25 +144,9 @@ class GazeDecoder(nn.Module):
             if image_global_token.ndim == 2:
                 image_global_token = image_global_token.unsqueeze(1)
             image_context = torch.cat([image_global_token, image_context], dim=1)  # (b, 1+h*w, c)
-        # Score the scene tokens once and share it across blocks; each block scales it by its own
-        # learned weight. The global token carries no spatial position, so it scores 0 and is left
-        # untouched by the prior.
-        gaze_direction_score = None
-        if head_center is not None and gaze_direction is not None:
-            gaze_direction_score = self.build_gaze_direction_score(
-                head_center, gaze_direction, feature_map_size=ih
-            )  # (b, n, h*w)
-            if image_global_token is not None:
-                gaze_direction_score = F.pad(gaze_direction_score, (1, 0), value=0.0)
-
         queries = self.query_tokens.expand(b, n, -1)  # (b, n, c)
         for block in self.blocks:
-            queries = block(
-                queries=queries,
-                image_context=image_context,
-                gaze_context=gaze_tokens,
-                gaze_direction_score=gaze_direction_score,
-            )
+            queries = block(queries=queries, image_context=image_context, gaze_context=gaze_tokens)
 
         upscaled_image_tokens = self.upscaler(image_tokens)  # (b, c', hm_h, hm_w)
         b, c, h, w = upscaled_image_tokens.shape
@@ -261,19 +201,11 @@ class QueryGazeAttentionBlock(nn.Module):
         self.mlp = MLPBlock(token_dim, mlp_dim, activation)
         self.norm_mlp = nn.LayerNorm(token_dim)
 
-        # How strongly this layer tilts its scene attention towards the predicted gaze direction.
-        # Zero-initialised, so the block starts out identical to one without the prior and has to
-        # earn any reliance on it; if the direction estimate is unhelpful, training can leave this
-        # at zero and lose nothing. A rigidly imposed cone prior is what "Enhancing Gaze Reasoning"
-        # (Wang et al.) found gave no gain, so the strength is learned rather than fixed.
-        self.gaze_bias_scale = nn.Parameter(torch.zeros(1))
-
     def forward(
         self,
         queries: Tensor,
         image_context: Tensor,
         gaze_context: Tensor,
-        gaze_direction_score: Tensor | None = None,
     ) -> Tensor:
         b, n, c = queries.shape
 
@@ -284,15 +216,8 @@ class QueryGazeAttentionBlock(nn.Module):
         queries = queries + self.cross_attn_query_to_gaze(q=q_own, k=gaze_own, v=gaze_own).reshape(b, n, c)
         queries = self.norm_gaze(queries)
 
-        # Each person's query independently attends to the shared scene tokens (no cross-person
-        # mixing here either), optionally tilted towards scene tokens that lie in the direction
-        # that person is predicted to be looking.
-        attn_bias = None
-        if gaze_direction_score is not None:
-            attn_bias = self.gaze_bias_scale * gaze_direction_score.unsqueeze(1)  # (b, 1, n, n_k)
-        queries = queries + self.cross_attn_query_to_image(
-            q=queries, k=image_context, v=image_context, attn_bias=attn_bias
-        )
+        # Each person's query independently attends to the shared scene tokens (no cross-person mixing here either).
+        queries = queries + self.cross_attn_query_to_image(q=queries, k=image_context, v=image_context)
         queries = self.norm_image(queries)
 
         queries = queries + self.mlp(queries)
@@ -333,7 +258,7 @@ class Attention(nn.Module):
         x = x.transpose(1, 2)
         return x.reshape(b, n_tokens, n_heads * c_per_head)  # B x N_tokens x C
 
-    def forward(self, q: Tensor, k: Tensor, v: Tensor, attn_bias: Tensor | None = None) -> Tensor:
+    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         # Input projections
         q = self.q_proj(q)
         k = self.k_proj(k)
@@ -347,11 +272,7 @@ class Attention(nn.Module):
         # Attention
         _, _, _, c_per_head = q.shape
         attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
-        attn = attn / math.sqrt(c_per_head)
-        if attn_bias is not None:
-            # Added before the softmax, so a bias of `x` scales a key's attention weight by exp(x)
-            # relative to the others. Shape broadcasts over the head dim: (b, 1, n_q, n_k).
-            attn = attn + attn_bias
+        attn = attn / math.sqrt(c_per_head) # inject fov here
         attn = torch.softmax(attn, dim=-1)
         
         # Get output

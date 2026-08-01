@@ -26,6 +26,7 @@ import pytorch_lightning as pl
 
 from XGaze.modeling.encoder import GazeEncoder, HuggingFaceDinoImageEncoder, SpatialInputTokenizer, ViTEncoder
 from XGaze.modeling.decoder import GazeDecoder
+from XGaze.modeling.lora import apply_lora, is_lora_param
 from XGaze.losses import compute_heatmap_loss, compute_angular_loss, compute_inout_loss, compute_ooc_loss
 from XGaze.metrics import Distance, GFTestAUC, GFTestDistance, TestAUC
 from XGaze.utils.common import spatial_argmax2d, dark_coordinate_decoding
@@ -74,7 +75,6 @@ class XGazeModule(pl.LightningModule):
             hf_image_encoder_trust_remote_code=xgaze_cfg.get("hf_image_encoder_trust_remote_code", dinov3_cfg.get("trust_remote_code", True)),
             use_image_global_token=dinov3_cfg.get("use_cls_token", True),
             predict_inout=self.dataset != "gazefollow",
-            use_gaze_attention_bias=xgaze_cfg.get("use_gaze_attention_bias", False),
         )
 
         self.feature_map_size = cfg.model.XGaze.image_size // cfg.model.XGaze.patch_size
@@ -173,6 +173,41 @@ class XGazeModule(pl.LightningModule):
         # Freeze weights
         self.freeze()
 
+        # LoRA goes on last: `freeze` would otherwise switch the adapters off along with the
+        # backbone they sit inside.
+        self._apply_lora()
+
+
+    def _apply_lora(self):
+        lora_cfg = self.cfg.model.get("lora", {})
+        if not lora_cfg.get("use", False):
+            return
+        if self.model.image_encoder_type != "dinov3_hf" or self.model.image_encoder is None:
+            raise ValueError("LoRA is only supported for the Hugging Face DINOv3 image encoder.")
+        if not self.cfg.train.freeze.image_encoder:
+            print(colored(
+                "LoRA is enabled but train.freeze.image_encoder is False, so the backbone is being "
+                "fully fine-tuned and the adapters are redundant.", "yellow"
+            ))
+
+        target_modules = list(lora_cfg.get("target_modules", ["q_proj", "v_proj"]))
+        num_wrapped, num_params = apply_lora(
+            self.model.image_encoder.backbone,
+            target_modules=target_modules,
+            r=lora_cfg.get("r", 8),
+            alpha=lora_cfg.get("alpha", 16),
+            dropout=lora_cfg.get("dropout", 0.0),
+            last_n_layers=lora_cfg.get("last_n_layers", -1),
+        )
+        scope = lora_cfg.get("last_n_layers", -1)
+        scope = "all layers" if scope is None or scope <= 0 else f"the last {scope} layers"
+        print(colored(
+            f"Applied LoRA (r={lora_cfg.get('r', 8)}, alpha={lora_cfg.get('alpha', 16)}) to "
+            f"{num_wrapped} projections across {scope} of the Image Encoder: "
+            f"{num_params:,} trainable parameters added ({', '.join(target_modules)}).",
+            TERM_COLOR,
+        ))
+
     
     def _set_batchnorm_eval(self, module):
         if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
@@ -223,8 +258,11 @@ class XGazeModule(pl.LightningModule):
         return None
 
     def _strip_dino_backbone(self, state_dict, prefix):
+        # LoRA adapters live inside the backbone but are trained, so they must survive the strip -
+        # dropping them would silently discard everything the adaptation learned.
         return OrderedDict(
-            (name, value) for name, value in state_dict.items() if not name.startswith(prefix)
+            (name, value) for name, value in state_dict.items()
+            if not name.startswith(prefix) or is_lora_param(name)
         )
 
     def on_save_checkpoint(self, checkpoint):
@@ -243,8 +281,12 @@ class XGazeModule(pl.LightningModule):
             return
         # Re-inject the (already loaded, pretrained) backbone weights before Lightning restores
         # the state dict, so both the model and the SWA callback see a complete state dict.
+        # Only the frozen weights are re-injected: the checkpoint's own LoRA adapters must win over
+        # the freshly initialised ones currently on the model.
         backbone_state = OrderedDict(
-            (f"{prefix}{name}", value) for name, value in self.model.image_encoder.backbone.state_dict().items()
+            (f"{prefix}{name}", value)
+            for name, value in self.model.image_encoder.backbone.state_dict().items()
+            if not is_lora_param(name)
         )
         checkpoint["state_dict"].update(backbone_state)
         swa_state = checkpoint.get("callbacks", {}).get("StochasticWeightAveraging")
@@ -327,25 +369,6 @@ class XGazeModule(pl.LightningModule):
             "total_loss": total_loss.item(),
         }
         return total_loss, logs
-
-    def _log_gaze_bias_scales(self, batch_size):
-        """
-        Log each decoder block's gaze-attention bias scale. These start at zero, so their trajectory
-        is what says whether the model chose to rely on the predicted gaze direction at all: staying
-        near zero means the prior was not worth using, which is a different outcome from using it
-        and not gaining.
-        """
-        if not self.model.use_gaze_attention_bias:
-            return
-        for i, block in enumerate(self.model.gaze_decoder.blocks):
-            self.log(
-                f"gaze_bias_scale/block_{i}",
-                block.gaze_bias_scale.detach().squeeze(),
-                batch_size=batch_size,
-                prog_bar=False,
-                on_step=False,
-                on_epoch=True,
-            )
 
     def _ooc_active(self):
         """Whether the out-of-cone term should be computed: either it is weighted into the total
@@ -496,7 +519,6 @@ class XGazeModule(pl.LightningModule):
         if self._ooc_active() and logs["ooc_count"] > 0:
             self.log("loss/train/ooc", logs["ooc_loss"], batch_size=logs["ooc_count"], prog_bar=False, on_step=True, on_epoch=True)
         self.log("loss/train", logs["total_loss"], batch_size=n, prog_bar=True, on_step=True, on_epoch=True)
-        self._log_gaze_bias_scales(batch_size=n)
 
         return {"loss": loss}
 
@@ -607,11 +629,9 @@ class XGaze(nn.Module):
         hf_image_encoder_trust_remote_code: bool = True,
         use_image_global_token: bool = True,
         predict_inout: bool = True,
-        use_gaze_attention_bias: bool = False,
     ):
         super().__init__()
-
-        self.use_gaze_attention_bias = use_gaze_attention_bias
+        
         self.image_size = image_size
         self.image_embedding_size = image_size // patch_size
         self.heatmap_size = heatmap_size
@@ -698,27 +718,10 @@ class XGaze(nn.Module):
                 image_global_token = None
         
         # Decode Gaze Target =====================================================
-        head_center, gaze_direction = None, None
-        if self.use_gaze_attention_bias:
-            # `gaze_vec` is the encoder's own direction estimate, so the prior is available at
-            # inference too - unlike the out-of-cone penalty, which builds its cone from ground
-            # truth and therefore only exists during training.
-            head_bboxes = sample["head_bboxes"]  # (b, n, 4), normalized (xmin, ymin, xmax, ymax)
-            head_center = torch.stack(
-                [
-                    (head_bboxes[..., 0] + head_bboxes[..., 2]) / 2,
-                    (head_bboxes[..., 1] + head_bboxes[..., 3]) / 2,
-                ],
-                dim=-1,
-            )  # (b, n, 2)
-            gaze_direction = gaze_vec
-
         gaze_heatmap, inout_logits = self.gaze_decoder(
             image_tokens,
             gaze_tokens,
             image_global_token=image_global_token,
-            head_center=head_center,
-            gaze_direction=gaze_direction,
         )  # (b, n, hm_h, hm_w), (b, n)
 
         return gaze_heatmap, gaze_vec, inout_logits

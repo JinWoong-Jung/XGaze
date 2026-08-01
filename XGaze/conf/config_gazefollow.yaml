@@ -49,7 +49,6 @@ model:
         gaze_vec_dim: 2
         decoder_depth: 2
         decoder_num_heads: 8
-        use_gaze_attention_bias: False # tilt scene cross-attention towards the predicted gaze direction
         image_encoder:
             type: dinov3 # mae, dinov3
             dinov3:
@@ -62,6 +61,13 @@ model:
                 encoder_num_heads: 12
                 encoder_num_global_tokens: 1
                 weights: /home/jinwoongjung/XGaze/weights/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c.pth
+    lora: # low-rank adaptation of the frozen DINOv3 image encoder
+        use: False
+        r: 8 # rank of the low-rank residual
+        alpha: 16 # residual is scaled by alpha / r
+        dropout: 0.0 # dropout on the adapter input
+        target_modules: [q_proj, v_proj] # attention: q_proj, k_proj, v_proj, o_proj; mlp: up_proj, down_proj
+        last_n_layers: -1 # adapt only the last N blocks, or -1 for all of them
     pretraining:
         gaze_backbone: /home/jinwoongjung/XGaze/weights/gaze360_resnet18.pt
     weights: null # /!\ null (default), or path to a checkpoint (overrides pretraining weights)

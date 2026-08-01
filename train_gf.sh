@@ -15,7 +15,7 @@ EXPERIMENT_NAME="GF_layer-3_dim-768_attnbias"
 
 TOKEN_DIM="768"                               # Shared DINO/gaze/decoder token dimension
 DECODER_DEPTH="3"                             # Number of cross-attention decoder blocks
-GAZE_ATTN_BIAS="True"                         # Tilt scene cross-attention towards the predicted gaze direction
+USE_LORA="False"                              # LoRA on the frozen DINOv3 encoder (see model.lora in the config)
 
 LR="2e-4"
 
@@ -55,7 +55,7 @@ python main.py --config-name=config_gazefollow \
     experiment.name="$EXPERIMENT_NAME" \
     model.XGaze.token_dim="$TOKEN_DIM" \
     model.XGaze.decoder_depth="$DECODER_DEPTH" \
-    model.XGaze.use_gaze_attention_bias="$GAZE_ATTN_BIAS" \
+    model.lora.use="$USE_LORA" \
     model.XGaze.image_encoder.dinov3.model_name="$DINO_MODEL" \
     model.XGaze.image_encoder.dinov3.local_dir="$DINO_DIR" \
     optimizer.lr="$LR" \
