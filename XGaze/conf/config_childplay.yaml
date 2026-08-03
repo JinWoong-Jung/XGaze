@@ -54,6 +54,7 @@ model:
         gaze_vec_dim: 2
         decoder_depth: 2
         decoder_num_heads: 8
+        inout_dropout: 0.1
         image_encoder:
             type: dinov3 # mae, dinov3
             dinov3:
@@ -126,6 +127,7 @@ train:
         image_tokenizer: False
         image_encoder: True
         gaze_decoder: False
+        inout_only: False # freeze everything except gaze_decoder.inout_decoder when enabled
     swa:
         use: False
         lr: 1e-5

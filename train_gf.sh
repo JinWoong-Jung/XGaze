@@ -11,14 +11,14 @@
 
 # ── Settings ──────────────────────────────────────────────────────────────── #
 TASKS="train+test"                            # train+test (train from scratch then test) | test (zero-shot test only)
-EXPERIMENT_NAME="GF_layer-3_dim-768_attnbias"
+EXPERIMENT_NAME="GF-B_768_3_LoRA"
 
 TOKEN_DIM="768"                               # Shared DINO/gaze/decoder token dimension
 DECODER_DEPTH="3"                             # Number of cross-attention decoder blocks
-USE_LORA="False"                              # LoRA on the frozen DINOv3 encoder (see model.lora in the config)
+
+USE_LORA="True"                               # LoRA on the frozen DINOv3 encoder (see model.lora in the config)
 
 LR="2e-4"
-
 
 # ── Out-of-cone (OOC) penalty ─────────────────────────────────────────────── #
 # Penalises the share of predicted probability mass falling outside the ground-truth gaze cone.
@@ -33,7 +33,7 @@ OOC_TAU="1.0"                                 # Spatial-softmax temperature (mea
 OOC_MIN_GAZE_DIST="0.05"                      # Skip samples whose target is this close to the head centre
 
 
-DINO_SIZE="L"                                 # B (ViT-B/16) | L (ViT-L/16)
+DINO_SIZE="B"                                 # B (ViT-B/16) | L (ViT-L/16)
 
 case "$DINO_SIZE" in
     B)

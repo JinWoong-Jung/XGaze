@@ -26,6 +26,7 @@ class GazeDecoder(nn.Module):
         feature_map_size: int,
         heatmap_size: int,
         predict_inout: bool = True,
+        inout_dropout: float = 0.1,
     ) -> None:
         """
         Predicts gaze heatmaps given an image and gaze tokens, using a transformer architecture.
@@ -69,8 +70,15 @@ class GazeDecoder(nn.Module):
         self.heatmap_mlp = MLP(token_dim, token_dim, heatmap_emb_dim, 3)
 
         if self.predict_inout:
-            # 2-layer MLP head predicting in/out-of-frame per person query
-            self.inout_decoder = MLP(token_dim, token_dim, 1, 2)
+            # Bottlenecked in/out head: token_dim -> token_dim // 2 -> 1.
+            # Keep logits here; BCEWithLogitsLoss is applied by the Lightning module.
+            inout_hidden_dim = max(token_dim // 2, 1)
+            self.inout_decoder = nn.Sequential(
+                nn.Linear(token_dim, inout_hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(p=inout_dropout),
+                nn.Linear(inout_hidden_dim, 1),
+            )
         else:
             self.inout_decoder = None
 

@@ -75,6 +75,7 @@ class XGazeModule(pl.LightningModule):
             hf_image_encoder_trust_remote_code=xgaze_cfg.get("hf_image_encoder_trust_remote_code", dinov3_cfg.get("trust_remote_code", True)),
             use_image_global_token=dinov3_cfg.get("use_cls_token", True),
             predict_inout=self.dataset != "gazefollow",
+            inout_dropout=xgaze_cfg.get("inout_dropout", 0.1),
         )
 
         self.feature_map_size = cfg.model.XGaze.image_size // cfg.model.XGaze.patch_size
@@ -97,6 +98,8 @@ class XGazeModule(pl.LightningModule):
             "test_auc_vat": TestAUC(),
             "test_dist_childplay": Distance(),
             "test_auc_childplay": TestAUC(),
+            "val_inout_ap_vat": BinaryAveragePrecision(),
+            "val_inout_ap_childplay": BinaryAveragePrecision(),
             "test_inout_ap_vat": BinaryAveragePrecision(),
             "test_inout_ap_childplay": BinaryAveragePrecision(),
         })
@@ -177,6 +180,11 @@ class XGazeModule(pl.LightningModule):
         # backbone they sit inside.
         self._apply_lora()
 
+        # In/out-only adaptation: keep the gaze localization pathway exactly at its
+        # checkpoint values and train only the task-specific classifier.
+        if self.cfg.train.freeze.get("inout_only", False):
+            self.freeze_inout_only()
+
 
     def _apply_lora(self):
         lora_cfg = self.cfg.model.get("lora", {})
@@ -237,6 +245,18 @@ class XGazeModule(pl.LightningModule):
     def freeze_module(self, module):
         for param in module.parameters():
             param.requires_grad = False
+
+    def freeze_inout_only(self):
+        """Freeze the complete model except the multi-person in/out classifier."""
+        inout_decoder = self.model.gaze_decoder.inout_decoder
+        if inout_decoder is None:
+            raise ValueError("inout_only=True requires a dataset with an in/out decoder.")
+
+        for param in self.parameters():
+            param.requires_grad = False
+        for param in inout_decoder.parameters():
+            param.requires_grad = True
+        print(colored("In/out-only adaptation: all parameters frozen except `gaze_decoder.inout_decoder`.", TERM_COLOR))
 
             
     def freeze(self):
@@ -456,6 +476,8 @@ class XGazeModule(pl.LightningModule):
             wandb.define_metric('metric/test/avg_dist', summary='min')
             wandb.define_metric('metric/test/min_dist', summary='min')
             wandb.define_metric('metric/test/auc', summary='max')
+            wandb.define_metric('metric/val/inout_ap', summary='max')
+            wandb.define_metric('metric/test/inout_ap', summary='max')
             
             wandb.define_metric('loss/train_epoch', summary='min')
             wandb.define_metric('loss/val', summary='min')
@@ -463,6 +485,12 @@ class XGazeModule(pl.LightningModule):
 
             
     def on_train_epoch_start(self):
+        if self.cfg.train.freeze.get("inout_only", False):
+            # Prevent frozen BatchNorm/dropout state from changing during adaptation.
+            self.model.eval()
+            self.model.gaze_decoder.inout_decoder.train()
+            return
+
         # Set BN layers to eval mode for frozen modules
         if self.cfg.train.freeze.gaze_encoder:
             self.model.gaze_encoder.apply(self._set_batchnorm_eval)
@@ -565,6 +593,20 @@ class XGazeModule(pl.LightningModule):
 
         # Update metrics
         self.metrics["val_dist"].update(gaze_pt_pred, batch["gaze_pt"], batch["inout"])
+        val_inout_ap = None
+
+        # AP is evaluated on every validation epoch for the datasets that provide
+        # per-person in/out labels. GazeFollow has no in/out decoder.
+        if self.dataset in MULTI_PERSON_DATASETS and inout_pred_for_loss is not None:
+            suffix = "vat" if self.dataset == "video_attention_target" else "childplay"
+            inout_gt = batch["inout"]
+            known_mask = inout_gt != -1
+            if known_mask.any():
+                self.metrics[f"val_inout_ap_{suffix}"].update(
+                    inout_pred_for_loss.sigmoid()[known_mask],
+                    inout_gt[known_mask].long(),
+                )
+                val_inout_ap = self.metrics[f"val_inout_ap_{suffix}"]
 
         # Logging losses
         self.log("loss/val/heatmap", logs["heatmap_loss"], batch_size=ni, prog_bar=False, on_step=False, on_epoch=True)
@@ -577,6 +619,15 @@ class XGazeModule(pl.LightningModule):
 
         # Logging metrics
         self.log("metric/val/dist", self.metrics["val_dist"], batch_size=ni, prog_bar=True, on_step=False, on_epoch=True)
+        if val_inout_ap is not None:
+            self.log(
+                "metric/val/inout_ap",
+                val_inout_ap,
+                batch_size=int(known_mask.sum().item()),
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+            )
 
     def test_step(self, batch, batch_idx):
 
@@ -644,6 +695,7 @@ class XGaze(nn.Module):
         hf_image_encoder_trust_remote_code: bool = True,
         use_image_global_token: bool = True,
         predict_inout: bool = True,
+        inout_dropout: float = 0.1,
     ):
         super().__init__()
         
@@ -707,6 +759,7 @@ class XGaze(nn.Module):
             feature_map_size=self.image_embedding_size,
             heatmap_size=heatmap_size,
             predict_inout=predict_inout,
+            inout_dropout=inout_dropout,
         )
 
 
